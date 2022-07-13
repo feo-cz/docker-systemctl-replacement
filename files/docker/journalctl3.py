@@ -13,9 +13,10 @@ parser.add_argument('--system', default=False, action='store_true', help='Show s
 parser.add_argument('--user', default=False, action='store_true', help='Show user units')
 parser.add_argument('--root', metavar='path', type=str, help='Use subdirectory path')
 parser.add_argument('-x', default=False, action='store_true', help='Switch on verbose mode')
+parser.add_argument('--since', metavar='since', type=str, help='Dummy, do nothing')
 args = parser.parse_args()
 
-systemctl_py = "systemctl3.py"
+systemctl_py = "systemctl"
 path = os.path.dirname(sys.argv[0])
 systemctl = os.path.join(path, systemctl_py)
 
