@@ -26,6 +26,7 @@ import shlex
 import fnmatch
 import re
 from types import TracebackType
+import pickle
 
 __copyright__: str = "(C) 2016-2026 Guido U. Draheim, licensed under the EUPL"
 __version__: str = "1.7.1311"
@@ -7056,6 +7057,50 @@ class Systemctl:
     def test_float(self) -> float:
         """ return 'Unknown result type' """
         return 0. # "Unknown result type"
+    def getEnvVarsFilePath(self):
+        return '/run/systemd/systemd.envs'
+    def getEnvVars(self):
+        fp = self.getEnvVarsFilePath()
+        vars = {}
+        if os.path.isfile(fp):
+            with open(fp, 'rb') as f:
+                vars = pickle.load(f)
+        return vars
+    def setEnvVar(self, varName, varValue = None):
+        vars = self.getEnvVars()
+        if varValue is None:
+            if varName in vars:
+                del vars[varName]
+        else:
+            vars[varName] = varValue
+        with open(self.getEnvVarsFilePath(), 'wb') as f:
+            pickle.dump(vars, f)
+    def get_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1        
+        varName = args[0]
+        vars = self.getEnvVars()
+        if varName in vars:
+            return vars[varName]
+        return ''
+    def set_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1
+        boom = args[0].split('=', 2)
+        if len(boom) != 2:
+            return 2
+        varName = boom[0]
+        varValue = boom[1]
+        logg.debug("Set env variable %s to \"%s\"", varName, varValue)
+        self.setEnvVar(varName, varValue)
+        return 0
+    def unset_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1        
+        varName = args[0]
+        logg.debug("Unset env variable %s", varName)
+        self.setEnvVar(varName)
+        return 0
 
 def print_begin(argv: List[str], args: List[str]) -> None:
     script = os.path.realpath(argv[0])
@@ -7139,6 +7184,15 @@ def runcommand(command: str, *modules: str) -> int:
         exitcode = is_not_ok(systemctl.enable_modules(*modules))
     elif command in ["environment"]:
         print_str_dict(systemctl.environment_of_unit(*modules))
+    elif command in ["get-environment"]:
+        result = systemctl.get_environment_modules(*modules)
+        assert result is not None
+        if isinstance(result, int): exitcode = result 
+        elif isinstance(result, str): print_str(result)
+    elif command in ["set-environment"]:
+        exitcode = systemctl.set_environment_modules(*modules)
+    elif command in ["unset-environment"]:
+        exitcode = systemctl.unset_environment_modules(*modules)        
     elif command in ["get-default"]:
         print_str(systemctl.get_default_target())
     elif command in ["get-preset"]:
