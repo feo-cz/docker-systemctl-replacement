@@ -1378,6 +1378,7 @@ class SystemctlUnitFiles:
     _loaded_instance_conf: Dict[str, SystemctlConf]
     _file_for_sysv: Dict[str, str]
     _file_for_unit: Dict[str, str]
+    _alias_for_unit: Dict[str, str]
     _preset_file_list: Optional[Dict[str, PresetFile]]
     def __init__(self, root: str = NIX) -> None:
         self._root = root or _root
@@ -1395,6 +1396,7 @@ class SystemctlUnitFiles:
         self._loaded_instance_conf = {} # name@instance.service => config data of that instance
         self._file_for_sysv = {} # name.service => /etc/init.d/name
         self._file_for_unit = {} # name.service => /etc/systemd/system/name.service
+        self._alias_for_unit = {} # aliased.service => real.service (symlinked unit files)
         self._preset_file_list = None # /etc/systemd/system-preset/* => file content
     def os_path(self, path: str) -> str:
         return os_path(self._root, path)
@@ -1507,15 +1509,28 @@ class SystemctlUnitFiles:
         service_name = name
         if service_name not in self._file_for_unit:
             self._file_for_unit[service_name] = path
+        if os.path.islink(path):
+            link_target = os.readlink(path)
+            if link_target.endswith(".service"):
+                target_name = os.path.basename(link_target)
+                self._alias_for_unit[service_name] = target_name
+                logg.debug("alias found %s => %s", service_name, target_name)
         return len(self._file_for_unit)
     def add_sysv_file(self, name: str, path: str) -> int:
         service_name = name + ".service" # simulate systemd
         if service_name not in self._file_for_sysv:
             self._file_for_sysv[service_name] = path
         return len(self._file_for_sysv)
+    def real_unit_name(self, module: Optional[str] = None) -> Optional[str]:
+        """ resolve an aliased unit name (symlinked unit file) to the real one """
+        if module is None:
+            return None
+        self.scan_unit_files()
+        return self._alias_for_unit.get(module, module)
     def get_unit_file(self, module: Optional[str] = None) -> Optional[str]: # -> filename?
         """ file path for the given module (systemd) """
         self.scan_unit_files()
+        module = self.real_unit_name(module)
         if module and module in self._file_for_unit:
             return self._file_for_unit[module]
         if module and unit_of(module) in self._file_for_unit:
@@ -1633,7 +1648,7 @@ class SystemctlUnitFiles:
             for name in sorted(drop_in_files):
                 path = drop_in_files[name]
                 data.read_unit_file(path)
-        conf = SystemctlConf(data, module)
+        conf = SystemctlConf(data, self.real_unit_name(module))
         conf.masked = masked
         conf.nonloaded_path = path # if masked
         conf.drop_in_files = drop_in_files
