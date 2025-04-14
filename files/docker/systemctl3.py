@@ -1823,6 +1823,12 @@ class Systemctl:
                 service for service in result
                 if fnmatch.fnmatch(service[0], filterString)
             ]
+        if len(self._only_state) > 0:
+            result = [
+                service for service in result
+                if service[1] in self._only_state
+            ]
+        
 
         if self._no_legend:
             return result
