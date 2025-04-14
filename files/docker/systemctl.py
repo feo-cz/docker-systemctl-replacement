@@ -1816,6 +1816,14 @@ class Systemctl:
         else:
             result = self.list_target_unit_files()
             result += self.list_service_unit_files(*modules)
+            
+        filterString = modules[0] if len(modules) >= 1 else None
+        if filterString:
+            result = [
+                service for service in result
+                if fnmatch.fnmatch(service[0], filterString)
+            ]
+
         if self._no_legend:
             return result
         found = "%s unit files listed." % len(result)
