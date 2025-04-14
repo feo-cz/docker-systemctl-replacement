@@ -20,6 +20,7 @@ import shlex
 import fnmatch
 import re
 from types import GeneratorType
+import pickle
 
 __copyright__ = "(C) 2016-2025 Guido U. Draheim, licensed under the EUPL"
 __version__ = "1.5.9063"
@@ -1351,6 +1352,7 @@ class Systemctl:
         self._loaded_file_sysd = {} # /etc/systemd/system/name.service => config data
         self._file_for_unit_sysv = None # name.service => /etc/init.d/name
         self._file_for_unit_sysd = None # name.service => /etc/systemd/system/name.service
+        self._sysd_alias = None #map od aliases of services (aliased => realservice)
         self._preset_file_list = None # /etc/systemd/system-preset/* => file content
         self._default_target = DefaultTarget
         self._sysinit_target = None # stores a UnitConf()
@@ -1435,6 +1437,7 @@ class Systemctl:
         """ reads all unit files, returns the first filename for the unit given """
         if self._file_for_unit_sysd is None:
             self._file_for_unit_sysd = {}
+            self._sysd_alias = {}
             for folder in self.sysd_folders():
                 if not folder:
                     continue
@@ -1448,6 +1451,12 @@ class Systemctl:
                     service_name = name
                     if service_name not in self._file_for_unit_sysd:
                         self._file_for_unit_sysd[service_name] = path
+                    if os.path.islink(path):
+                        path_target = os.readlink(path)
+                        if path_target.endswith(".service"):
+                            service_name_target = os.path.basename(path_target)
+                            self._sysd_alias[service_name] = service_name_target
+                            logg.debug("alias found %s => %s", service_name, service_name_target)
             logg.debug("found %s sysd files", len(self._file_for_unit_sysd))
         return list(self._file_for_unit_sysd.keys())
     def scan_unit_sysv_files(self, module = None): # -> [ unit-names,... ]
@@ -1469,10 +1478,18 @@ class Systemctl:
                         self._file_for_unit_sysv[service_name] = path
             logg.debug("found %s sysv files", len(self._file_for_unit_sysv))
         return list(self._file_for_unit_sysv.keys())
+    def _getRealModuleName(self, module):
+        if module is None:
+            return None
+        if self._sysd_alias is None:
+            self.scan_unit_sysd_files()
+        assert self._sysd_alias is not None
+        return module if not module in self._sysd_alias else self._sysd_alias[module]
     def unit_sysd_file(self, module = None): # -> filename?
         """ file path for the given module (systemd) """
         self.scan_unit_sysd_files()
         assert self._file_for_unit_sysd is not None
+        module = self._getRealModuleName(module)
         if module and module in self._file_for_unit_sysd:
             return self._file_for_unit_sysd[module]
         if module and unit_of(module) in self._file_for_unit_sysd:
@@ -1575,7 +1592,9 @@ class Systemctl:
             for name in sorted(drop_in_files):
                 path = drop_in_files[name]
                 data.read_sysd(path)
-        conf = SystemctlConf(data, module)
+        assert self._sysd_alias is not None
+        module_real = module if not module in self._sysd_alias else self._sysd_alias[module]
+        conf = SystemctlConf(data, module_real)
         conf.masked = masked
         conf.nonloaded_path = path # if masked
         conf.drop_in_files = drop_in_files
@@ -1816,6 +1835,20 @@ class Systemctl:
         else:
             result = self.list_target_unit_files()
             result += self.list_service_unit_files(*modules)
+            
+        filterString = modules[0] if len(modules) >= 1 else None
+        if filterString:
+            result = [
+                service for service in result
+                if fnmatch.fnmatch(service[0], filterString)
+            ]
+        if len(self._only_state) > 0:
+            result = [
+                service for service in result
+                if service[1] in self._only_state
+            ]
+        
+
         if self._no_legend:
             return result
         found = "%s unit files listed." % len(result)
@@ -2991,8 +3024,10 @@ class Systemctl:
                 exe, newcmd = self.exec_newcmd(cmd, env, conf)
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                if not forkpid: 
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3167,7 +3202,9 @@ class Systemctl:
                 logg.info("post-fail %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-fail done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3180,7 +3217,9 @@ class Systemctl:
                 logg.info("post-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3288,8 +3327,10 @@ class Systemctl:
                 exe, newcmd = self.exec_newcmd(cmd, env, conf)
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                if not forkpid: 
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3329,7 +3370,9 @@ class Systemctl:
                 logg.info("post-fail %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-fail done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3340,7 +3383,9 @@ class Systemctl:
                 logg.info("post-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3478,6 +3523,8 @@ class Systemctl:
                 if item:
                     result.append(self.expand_special(item, conf))
         return result
+    def get_PermissionsStartOnly(self, conf):
+        return conf.getbool("Service", "PermissionsStartOnly", "no")
     def get_User(self, conf):
         return self.expand_special(conf.get(Service, "User", ""), conf)
     def get_Group(self, conf):
@@ -3565,7 +3612,7 @@ class Systemctl:
             os.dup2(inp.fileno(), sys.stdin.fileno())
             os.dup2(out.fileno(), sys.stdout.fileno())
             os.dup2(err.fileno(), sys.stderr.fileno())
-    def execve_from(self, conf, cmd, env):
+    def execve_from(self, conf, cmd, env, runAsRoot = False):
         """ this code is commonly run in a child process // returns exit-code"""
         # |
         runs = conf.get(Service, "Type", "simple").lower()
@@ -3575,6 +3622,10 @@ class Systemctl:
         #
         runuser = self.get_User(conf)
         rungroup = self.get_Group(conf)
+        if runAsRoot is True:
+            runuser = "root"
+            rungroup = "root"
+        """ logg.debug("Executing as %s:%s", runuser, rungroup)"""
         xgroups = self.get_SupplementaryGroups(conf)
         envs = shutil_setuid(runuser, rungroup, xgroups)
         badpath = self.chdir_workingdir(conf) # some dirs need setuid before
@@ -3774,7 +3825,9 @@ class Systemctl:
                 logg.info("post-stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -3812,7 +3865,9 @@ class Systemctl:
                 logg.info("post-stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    permissionsStartOnly = self.get_PermissionsStartOnly(conf)
+                    runAsRoot = permissionsStartOnly
+                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -5036,7 +5091,12 @@ class Systemctl:
             _f = self._force and "-f" or ""
             logg.info("rm {_f} '{target}'".format(**locals()))
         if os.path.islink(target):
-            os.remove(target)
+            link_target = os.readlink(target)
+            if link_target == _dev_null:
+                os.remove(target)
+                logg.info("Unit %s was masked and has been unmasked.", unit)
+            else:
+                logg.info("Unit %s is not masked (symlink points to %s); nothing to do.")
             return True
         elif not os.path.exists(target):
             logg.debug("Symlink did not exist anymore: %s", target)
@@ -6451,6 +6511,50 @@ class Systemctl:
         return [self.systemd_version(), self.systemd_features()]
     def test_float(self):
         return 0. # "Unknown result type"
+    def getEnvVarsFilePath(self):
+        return '/run/systemd/systemd.envs'
+    def getEnvVars(self):
+        fp = self.getEnvVarsFilePath()
+        vars = {}
+        if os.path.isfile(fp):
+            with open(fp, 'rb') as f:
+                vars = pickle.load(f)
+        return vars
+    def setEnvVar(self, varName, varValue = None):
+        vars = self.getEnvVars()
+        if varValue is None:
+            if varName in vars:
+                del vars[varName]
+        else:
+            vars[varName] = varValue
+        with open(self.getEnvVarsFilePath(), 'wb') as f:
+            pickle.dump(vars, f)
+    def get_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1        
+        varName = args[0]
+        vars = self.getEnvVars()
+        if varName in vars:
+            return vars[varName]
+        return ''
+    def set_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1
+        boom = args[0].split('=', 2)
+        if len(boom) != 2:
+            return 2
+        varName = boom[0]
+        varValue = boom[1]
+        logg.debug("Set env variable %s to \"%s\"", varName, varValue)
+        self.setEnvVar(varName, varValue)
+        return 0
+    def unset_environment_modules(self, *args):
+        if len(args) == 0:
+            return 1        
+        varName = args[0]
+        logg.debug("Unset env variable %s", varName)
+        self.setEnvVar(varName)
+        return 0
 
 def print_begin(argv, args):
     script = os.path.realpath(argv[0])
@@ -6560,6 +6664,15 @@ def runcommand(command, *modules):
         exitcode = is_not_ok(systemctl.enable_modules(*modules))
     elif command in ["environment"]:
         print_str_dict(systemctl.environment_of_unit(*modules))
+    elif command in ["get-environment"]:
+        result = systemctl.get_environment_modules(*modules)
+        assert result is not None
+        if isinstance(result, int): exitcode = result 
+        elif isinstance(result, str): print_str(result)
+    elif command in ["set-environment"]:
+        exitcode = systemctl.set_environment_modules(*modules)
+    elif command in ["unset-environment"]:
+        exitcode = systemctl.unset_environment_modules(*modules)        
     elif command in ["get-default"]:
         print_str(systemctl.get_default_target())
     elif command in ["get-preset"]:
