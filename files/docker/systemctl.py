@@ -3024,9 +3024,9 @@ class Systemctl:
                 exe, newcmd = self.exec_newcmd(cmd, env, conf)
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid: 
+                if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
@@ -3049,7 +3049,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid: # pragma: no cover
                     os.setsid() # detach child process from parent
-                    self.execve_from(conf, newcmd, env)
+                    self.execve_from(conf, newcmd, env, exe.nouser)
                 run = subprocess_waitpid(forkpid)
                 if run.returncode and exe.check:
                     returncode = run.returncode
@@ -3083,7 +3083,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid: # pragma: no cover
                     os.setsid() # detach child process from parent
-                    self.execve_from(conf, newcmd, env)
+                    self.execve_from(conf, newcmd, env, exe.nouser)
                 self.write_status_from(conf, MainPID=forkpid)
                 logg.info("%s started PID %s", runs, forkpid)
                 env["MAINPID"] = strE(forkpid)
@@ -3126,7 +3126,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid: # pragma: no cover
                     os.setsid() # detach child process from parent
-                    self.execve_from(conf, newcmd, env)
+                    self.execve_from(conf, newcmd, env, exe.nouser)
                 # via NOTIFY # self.write_status_from(conf, MainPID=forkpid)
                 logg.info("%s started PID %s", runs, forkpid)
                 mainpid = forkpid
@@ -3168,7 +3168,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid: # pragma: no cover
                     os.setsid() # detach child process from parent
-                    self.execve_from(conf, newcmd, env)
+                    self.execve_from(conf, newcmd, env, exe.nouser)
                 logg.info("%s started PID %s", runs, forkpid)
                 run = subprocess_waitpid(forkpid)
                 if run.returncode and exe.check:
@@ -3203,7 +3203,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-fail done (%s) <-%s>",
@@ -3218,7 +3218,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-start done (%s) <-%s>",
@@ -3327,9 +3327,9 @@ class Systemctl:
                 exe, newcmd = self.exec_newcmd(cmd, env, conf)
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid: 
+                if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
@@ -3371,7 +3371,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-fail done (%s) <-%s>",
@@ -3384,7 +3384,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-start done (%s) <-%s>",
@@ -3729,7 +3729,7 @@ class Systemctl:
                 logg.info("%s stop %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 if run.returncode and exe.check:
                     returncode = run.returncode
@@ -3759,7 +3759,7 @@ class Systemctl:
                 logg.info("%s stop %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 run = must_have_failed(run, newcmd) # TODO: a workaround
                 # self.write_status_from(conf, MainPID=run.pid) # no ExecStop
@@ -3792,7 +3792,7 @@ class Systemctl:
                 logg.info("fork stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 if run.returncode and exe.check:
                     returncode = run.returncode
@@ -3826,7 +3826,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
@@ -3866,7 +3866,7 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     permissionsStartOnly = self.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly
+                    runAsRoot = permissionsStartOnly or exe.nouser
                     self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
@@ -3976,7 +3976,7 @@ class Systemctl:
                 logg.info("%s reload %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    self.execve_from(conf, newcmd, env) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 if run.returncode and exe.check:
                     logg.error("Job for %s failed because the control process exited with error code. (%s)",
