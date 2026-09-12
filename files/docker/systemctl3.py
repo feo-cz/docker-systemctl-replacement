@@ -1513,8 +1513,16 @@ class SystemctlUnitFiles:
             link_target = os.readlink(path)
             if link_target.endswith(".service"):
                 target_name = os.path.basename(link_target)
-                self._alias_for_unit[service_name] = target_name
-                logg.debug("alias found %s => %s", service_name, target_name)
+                unit = parse_unit(service_name)
+                if unit.instance and target_name == "%s@.%s" % (unit.prefix, unit.suffix):
+                    # foo@one.service -> foo@.service is how an instance is enabled,
+                    # not an alias. Resolving it to the template would hand every
+                    # instance the template's conf again, which is the sharing that
+                    # cost each instance but the last its state.
+                    logg.debug("instance link %s => %s", service_name, target_name)
+                else:
+                    self._alias_for_unit[service_name] = target_name
+                    logg.debug("alias found %s => %s", service_name, target_name)
         return len(self._file_for_unit)
     def add_sysv_file(self, name: str, path: str) -> int:
         service_name = name + ".service" # simulate systemd
