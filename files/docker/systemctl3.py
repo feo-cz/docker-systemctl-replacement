@@ -1375,6 +1375,7 @@ class SystemctlUnitFiles:
     _loaded_sysv_files: float
     _loaded_sysv_conf: Dict[str, SystemctlConf]
     _loaded_unit_conf: Dict[str, SystemctlConf]
+    _loaded_instance_conf: Dict[str, SystemctlConf]
     _file_for_sysv: Dict[str, str]
     _file_for_unit: Dict[str, str]
     _preset_file_list: Optional[Dict[str, PresetFile]]
@@ -1391,6 +1392,7 @@ class SystemctlUnitFiles:
         self._loaded_sysv_files: float = 0.0 # time.time()
         self._loaded_sysv_conf = {} # /etc/init.d/name => config data
         self._loaded_unit_conf = {} # /etc/systemd/system/name.service => config data
+        self._loaded_instance_conf = {} # name@instance.service => config data of that instance
         self._file_for_sysv = {} # name.service => /etc/init.d/name
         self._file_for_unit = {} # name.service => /etc/systemd/system/name.service
         self._preset_file_list = None # /etc/systemd/system-preset/* => file content
@@ -1592,11 +1594,24 @@ class SystemctlUnitFiles:
     def load_unit_template_conf(self, module: Optional[str]) -> Optional[SystemctlConf]: # -> conf?
         """ read the unit template with a UnitConfParser (systemd) """
         if module and "@" in module:
+            if module in self._loaded_instance_conf:
+                return self._loaded_instance_conf[module]
             unit = parse_unit(module)
             service = "%s@.service" % unit.prefix
-            conf = self.load_unit_conf(service)
-            if conf:
-                conf.module = module
+            template = self.load_unit_conf(service)
+            if template is None:
+                return None
+            # every instance needs its own conf. Handing out the template's object
+            # and only restamping .module made all instances share one status dict
+            # and one state_unreadable flag, so "foo@a foo@b" on a single command
+            # line reported each other's state - in both directions. The parsed
+            # unit data is immutable here and stays shared.
+            conf = SystemctlConf(template.data, module)
+            conf.masked = template.masked
+            conf.nonloaded_path = template.nonloaded_path
+            conf.drop_in_files = template.drop_in_files
+            conf._root = template._root  # pylint: disable=protected-access
+            self._loaded_instance_conf[module] = conf
             return conf
         return None
     def load_unit_conf(self, module: Optional[str]) -> Optional[SystemctlConf]: # -> conf?
