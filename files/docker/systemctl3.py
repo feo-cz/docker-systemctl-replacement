@@ -2878,6 +2878,18 @@ class SystemctlJournal:
         cmd_args: List[Union[str, bytes]] = []
         return self.tail_log_file(self.get_log_from(conf), lines, follow, conf.name())
     def tail_log_file(self, log_path: str, lines: Optional[int] = None, follow: bool = False, unit: str = NIX) -> int:
+        if not follow and not os.path.exists(log_path):
+            # a unit that has not logged anything yet is not an error - there is
+            # simply nothing to show. Handing the missing path to tail turns that
+            # answer into a failure of the tool, and the systemd provider of puppet
+            # runs this command exactly when it is reporting that a service failed
+            # to start, so the tool's error buries the one that matters.
+            # Only an absent file, not an unreadable one: that would be a real
+            # problem and tail may still say so. And not for --follow either,
+            # where tail -F is waiting for the file to appear on purpose.
+            logg.debug("no journal for %s: %s", unit or log_path, log_path)
+            print("-- No entries --") # what the real journalctl says, to the byte
+            return 0
         if follow:
             tail_cmd = get_exist_path(self.tail_cmds)
             if tail_cmd is None:
@@ -2891,7 +2903,6 @@ class SystemctlJournal:
             return os.execvp(cmd_args[0], cmd_args) # pragma: no cover
         elif lines:
             tail_cmd = get_exist_path(self.tail_cmds)
-            logg.fatal("%s => %s", self.tail_cmds, tail_cmd)
             if tail_cmd is None:
                 print("tail command not found")
                 return 1

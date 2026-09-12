@@ -21989,6 +21989,37 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_4310_journal_of_a_unit_that_logged_nothing(self) -> None:
+        """ asking for the journal of a unit that has not logged anything is a
+            question with an answer - nothing - and not a failure. We handed the
+            missing path to tail, which failed, and the exit code said the command
+            had gone wrong. The systemd provider of puppet runs exactly this
+            command while it reports that a service failed to start, so the error
+            of the tool buried the error it was fetching. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(root, "/etc/systemd/system/zzj.service"), """
+            [Unit]
+            Description=Testing J
+            [Service]
+            ExecStart=/bin/true
+            """)
+        os.makedirs(os_path(root, "/var/log/journal"), exist_ok=True)
+        #
+        cmd = "{systemctl} log zzj.service -n 50 --no-pager"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, out, err)
+        self.assertEqual(end, 0)
+        self.assertEqual(out, "-- No entries --\n") # measured against systemd 257
+        self.assertFalse(greps(err, "cannot open")) # no complaint about the file
+        self.assertFalse(greps(err, "CRITICAL")) # and no debug print left behind
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def test_4300_background_default_journal(self) -> None:
         self.begin()
         self.rm_testdir()
