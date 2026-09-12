@@ -780,6 +780,58 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def _template_setup(self, tmp: str) -> "app.SystemctlUnitFiles":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/tmpl@.service", """
+        [Unit]
+        Description = template for %i
+        [Service]
+        ExecStart = /usr/bin/true %i""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit
+    def test_0400(self) -> None:
+        """ every instance of a template gets its own conf - they used to share the
+            template's object, so the name of the last one loaded won for all """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        self.assertEq(conf_b.name(), "tmpl@b.service")
+        self.assertEq(conf_a is conf_b, False)
+        self.rm_testdir()
+    def test_0401(self) -> None:
+        """ loading a second instance does not rename the first one """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        unit.load_conf("tmpl@b.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        self.rm_testdir()
+    def test_0402(self) -> None:
+        """ %i expands per instance, and the bare template has no instance at all """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        self.assertEq(unit.get_Description(conf_a), "template for a")
+        self.assertEq(unit.get_Description(conf_b), "template for b")
+        conf_t = unit.load_conf("tmpl@.service")
+        self.assertEq(unit.get_Description(conf_t), "template for ")
+        self.rm_testdir()
+    def test_0403(self) -> None:
+        """ the state of one instance is not the state of another """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        conf_a.status = {"ActiveState": "active"}
+        self.assertEq(conf_b.status, None)
+        self.assertEq(conf_a.status, {"ActiveState": "active"})
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
