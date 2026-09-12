@@ -916,6 +916,65 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(systemctl.read_pid_file(link), 4242)
         self.assertEq(systemctl.is_readable_file(link, None, ours=True), False)
         self.rm_testdir()
+    def _pidfile_unit(self, tmp: str) -> Any: # type: ignore[explicit-any]
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        os.makedirs(F"{tmp}/piddir")
+        text_file(F"{sysd}/zzp.service", """
+        [Service]
+        Type = forking
+        PIDFile = /piddir/zzp.pid
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzp.service")
+    def test_0444(self) -> None:
+        """ a PIDFile= we may not even stat does not by itself make the state
+            unknown - that file belongs to the application and may well sit behind
+            a directory we are not allowed to enter (exim4 keeps /run/exim4 at 0750).
+            When we never wrote a state for the unit, it was never started here, and
+            that is a complete answer: inactive, the same one root gets. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "inactive")
+            conf.status = None
+            self.assertEq(systemctl.get_substate_from(conf), "dead")
+        finally:
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.rm_testdir()
+    def test_0445(self) -> None:
+        """ and when we did write a state for it, that state is the answer - a
+            running service must not turn into "unknown" just because the pid file
+            the application keeps sits in a directory we may not enter """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid()) # a PID that is alive
+        conf.status = None
+        os.chmod(F"{tmp}/piddir", 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "active")
+            conf.status = None
+            self.assertEq(systemctl.get_substate_from(conf), "running")
+        finally:
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.rm_testdir()
+    def test_0446(self) -> None:
+        """ unknown is kept for the case it was meant for: our OWN state is what we
+            cannot read """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid())
+        conf.status = None
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "unknown")
+        finally:
+            os.chmod(status_file, 0o644)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

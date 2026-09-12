@@ -3194,8 +3194,11 @@ class Systemctl:
         """ MAINPID is either the PIDFile content written from the application
             or it is the value in the status file written by this systemctl.py code """
         pid_file = self.pid_file_from(conf)
-        if pid_file:
+        if pid_file and self.is_readable_file(pid_file, conf, ours=False):
             return self.read_pid_file(pid_file, default, conf)
+        # the pid file belongs to the application and may sit where we may not look
+        # (exim4 keeps /run/exim4 at 0750). Our own status file is written by us and
+        # world readable, so it answers even when that one does not.
         status = self.read_status_from(conf)
         if "MainPID" in status:
             return to_intN(status["MainPID"], default)
@@ -5361,6 +5364,15 @@ class Systemctl:
         else:
             logg.debug("is-active not implemented for unit type: %s", conf.name())
             return "unknown" # TODO: "inactive" ?
+    def have_status_of(self, conf: SystemctlConf) -> bool:
+        """ did we ever record a state for this unit? A PIDFile= belongs to the
+            application and may sit behind a directory we are not allowed to enter
+            (exim4 keeps /run/exim4 at 0750), so being unable to read it says
+            nothing on its own. Our own status file does: when there is none, the
+            unit was never started here, and "inactive" is a complete answer rather
+            than a gap - the same one a privileged caller gets. "unknown" is kept
+            for the case where our own state is the thing we cannot read. """
+        return bool(self.getsize(self.get_status_file_from(conf)))
     def get_active_service_from(self, conf: Optional[SystemctlConf]) -> str:
         """ returns 'active' 'inactive' 'failed' 'unknown' """
         # used in try-restart/other commands to check if needed.
@@ -5370,7 +5382,9 @@ class Systemctl:
         if pid_file: # application PIDFile
             conf.state_unreadable = False
             if not self.is_readable_file(pid_file, conf, ours=False):
-                return "unknown" if conf.state_unreadable else "inactive"
+                if not self.have_status_of(conf):
+                    return "inactive" # never started here - a complete answer
+                conf.state_unreadable = False # our own state answers below
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
@@ -5423,7 +5437,9 @@ class Systemctl:
         if pid_file:
             conf.state_unreadable = False
             if not self.is_readable_file(pid_file, conf, ours=False):
-                return "unknown" if conf.state_unreadable else "dead"
+                if not self.have_status_of(conf):
+                    return "dead" # never started here - a complete answer
+                conf.state_unreadable = False # our own state answers below
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
