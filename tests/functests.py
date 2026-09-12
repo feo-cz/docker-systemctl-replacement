@@ -55,6 +55,8 @@ if __name__ == "__main__":
         logg.info("log diverted to %s", opt.logfile)
 
 logg.warning("importing %s", SYSTEMCTL)
+sys.path.insert(0, os.path.dirname(SYSTEMCTL) or ".")
+import journalctl3 as journal # pylint: disable=wrong-import-position,import-error
 if "files/docker/systemctl3" in SYSTEMCTL:
     sys.path = [os.curdir] + sys.path
     from files.docker import systemctl3 as app # pylint: disable=wrong-import-position,import-error,no-name-in-module
@@ -884,6 +886,29 @@ class AppUnitTest(unittest.TestCase):
                 self.assertEq(exe.nouser, nouser, name)
                 self.assertEq(exe.check, check, name)
         self.rm_testdir()
+    def test_0360(self) -> None:
+        """ journalctl --since is accepted and ignored - deployment tooling passes it
+            and systemd would not fail on it either """
+        parser = journal.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service", "--since", "yesterday"])
+        self.assertEq(args.unit, "zzz.service")
+        self.assertEq(args.since, "yesterday")
+        cmd = journal.systemctl_command(args)
+        self.assertEq("--since" in cmd, False)
+        self.assertEq("yesterday" in cmd, False)
+    def test_0361(self) -> None:
+        """ it calls the tool by the name it is installed under, 'systemctl' """
+        parser = journal.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service"])
+        self.assertEq(journal.systemctl_command(args), ["systemctl", "log", "zzz.service"])
+        self.assertEq(journal.systemctl_command(args, "/bin"), ["/bin/systemctl", "log", "zzz.service"])
+    def test_0362(self) -> None:
+        """ the other options are translated, and -u itself is dropped """
+        parser = journal.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service", "-f", "-n", "5", "--no-pager", "--root", "/R", "-x"])
+        cmd = journal.systemctl_command(args)
+        self.assertEq(cmd, ["systemctl", "log", "zzz.service", "-f", "-n", "5", "--no-pager", "--root", "/R", "-vvv"])
+        self.assertEq("-u" in cmd, False)
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
