@@ -852,15 +852,15 @@ class AppUnitTest(unittest.TestCase):
         conf1 = unit.get_conf(svc1)
         env1 = unit.get_env(conf1)
         pre = conf1.getlist("Service", "ExecStartPre", [])[0]
-        exe, newcmd = unit.expand_cmd(pre, env1, conf1)
+        exe, _newcmd = unit.expand_cmd(pre, env1, conf1)
         self.assertEq(systemctl.run_as_root(conf1, exe), True)   # '+' prefix
         start = conf1.getlist("Service", "ExecStart", [])[0]
-        exe, newcmd = unit.expand_cmd(start, env1, conf1)
+        exe, _newcmd = unit.expand_cmd(start, env1, conf1)
         self.assertEq(systemctl.run_as_root(conf1, exe), False)  # plain, has User=
         conf2 = unit.get_conf(svc2)
         env2 = unit.get_env(conf2)
         start = conf2.getlist("Service", "ExecStart", [])[0]
-        exe, newcmd = unit.expand_cmd(start, env2, conf2)
+        exe, _newcmd = unit.expand_cmd(start, env2, conf2)
         self.assertEq(systemctl.run_as_root(conf2, exe), True)   # PermissionsStartOnly
         self.rm_testdir()
     def test_0353(self) -> None:
