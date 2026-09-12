@@ -684,6 +684,19 @@ def _pid_exists(pid: int) -> bool:
             raise
     else:
         return True
+def killmode_pidlist(killmode: str, mainpid: int, pidlist: List[int], sigkill: bool = False) -> List[int]:
+    """ the processes that KillMode= makes us signal - and therefore the ones we
+        have to wait for. From systemd.kill(5): 'control-group' takes all remaining
+        processes of the unit, 'mixed' sends the kill signal to the main process
+        while the subsequent SIGKILL goes to all remaining ones, 'process' kills
+        only the main process itself, and 'none' kills no process at all. """
+    if killmode in ["none"]:
+        return []
+    if killmode in ["control-group"]:
+        return list(pidlist)
+    if killmode in ["mixed"] and sigkill:
+        return list(pidlist)
+    return [mainpid]
 def pid_zombie(pid: int) -> bool:
     """ may be a pid exists but it is only a zombie """
     if pid is None:
@@ -5364,23 +5377,23 @@ class Systemctl:
             # because we list child processes, not processes in control-group
             return True
         pidlist = self.pidlist_of(mainpid) # here
-        if pid_exists(mainpid):
-            logg.info("stop kill PID %s", mainpid)
-            self._kill_pid(mainpid, kill_signal)
-        if useKillMode in ["control-group"]:
-            if len(pidlist) > 1:
-                logg.info("stop control-group PIDs %s", pidlist)
-            for pid in pidlist:
-                if pid != mainpid:
-                    self._kill_pid(pid, kill_signal)
+        killlist = killmode_pidlist(useKillMode, mainpid, pidlist)
+        if len(killlist) > 1:
+            logg.info("stop control-group PIDs %s", killlist)
+        for pid in killlist:
+            if pid_exists(pid):
+                logg.info("stop kill PID %s", pid)
+                self._kill_pid(pid, kill_signal)
         if doSendSIGHUP:
-            logg.info("stop SendSIGHUP to PIDs %s", pidlist)
-            for pid in pidlist:
+            logg.info("stop SendSIGHUP to PIDs %s", killlist)
+            for pid in killlist:
                 self._kill_pid(pid, signal.SIGHUP)
-        # wait for the processes to have exited
+        # wait for the processes to have exited - only for the ones we did signal,
+        # as KillMode=process leaves the other processes of the unit running on
+        # purpose (sshd sessions, cron jobs) and they are never going to exit here
         while True:
             dead = True
-            for pid in pidlist:
+            for pid in killlist:
                 if pid_exists(pid) and not pid_zombie(pid):
                     dead = False
                     break
@@ -5389,22 +5402,22 @@ class Systemctl:
             if time.monotonic() > started + timeout:
                 logg.info("service PIDs not stopped after %s", timeout)
                 break
-            time.sleep(1) # until TimeoutStopSec
+            time.sleep(WaitPollSec) # until TimeoutStopSec
         if dead or not doSendSIGKILL:
             logg.info("done kill PID %s %s", mainpid, dead and "OK")
             return dead
-        if useKillMode in ["control-group", "mixed"]:
-            logg.info("hard kill PIDs %s", pidlist)
-            for pid in pidlist:
-                if pid != mainpid:
-                    self._kill_pid(pid, signal.SIGKILL)
+        hardlist = killmode_pidlist(useKillMode, mainpid, pidlist, sigkill=True)
+        logg.info("hard kill PIDs %s", hardlist)
+        for pid in hardlist:
+            if pid_exists(pid):
+                self._kill_pid(pid, signal.SIGKILL)
+        if hardlist:
             time.sleep(MinimumYield)
-        # useKillMode in [ "control-group", "mixed", "process" ]
-        if pid_exists(mainpid):
-            logg.info("hard kill PID %s", mainpid)
-            self._kill_pid(mainpid, signal.SIGKILL)
-            time.sleep(MinimumYield)
-        dead = not pid_exists(mainpid) or pid_zombie(mainpid)
+        dead = True
+        for pid in hardlist:
+            if pid_exists(pid) and not pid_zombie(pid):
+                dead = False
+                break
         logg.info("done hard kill PID %s %s", mainpid, dead and "OK")
         return dead
     def _kill_pid(self, pid: int, kill_signal: Optional[int] = None) -> bool:
