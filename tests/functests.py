@@ -1444,6 +1444,43 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(systemctl.get_active_from(conf), "inactive")
         self.assertEq(systemctl.get_substate_from(conf), "dead")
         self.rm_testdir()
+    def test_0490(self) -> None:
+        """ a PIDFile= we may not stat is the normal case for an unprivileged
+            caller - exim4 keeps /run/exim4 at 0750 - and we answer it correctly
+            from our own state. Saying so at WARNING on every single query buries
+            the warnings that do mean something. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        logged = []
+        warning = app.logg.warning
+        app.logg.warning = lambda fmt, *a: logged.append(fmt % a) # type: ignore[method-assign,assignment]
+        try:
+            pid_file = F"{tmp}/piddir/zzp.pid"
+            self.assertFalse(systemctl.is_readable_file(pid_file, conf, ours=False))
+        finally:
+            app.logg.warning = warning # type: ignore[method-assign]
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.assertEqual(logged, [])
+        self.assertTrue(conf.state_unreadable) # still recorded, just not shouted
+        self.rm_testdir()
+    def test_0491(self) -> None:
+        """ ... but a file of our own that we may not stat is a real surprise and
+            keeps its warning """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        logged = []
+        warning = app.logg.warning
+        app.logg.warning = lambda fmt, *a: logged.append(fmt % a) # type: ignore[method-assign,assignment]
+        try:
+            self.assertFalse(systemctl.is_readable_file(F"{tmp}/piddir/ours.state", conf))
+        finally:
+            app.logg.warning = warning # type: ignore[method-assign]
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.assertEqual(len(logged), 1)
+        self.assertTrue(logged[0].startswith("can not stat"))
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

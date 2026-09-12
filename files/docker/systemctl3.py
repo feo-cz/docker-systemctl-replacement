@@ -3193,7 +3193,15 @@ class Systemctl:
         except OSError as e:
             if e.errno in (errno.ENOENT, errno.ENOTDIR):
                 return False # absent is a real answer
-            logg.warning("can not stat %s >> %s", filename, e)
+            # a PIDFile= belongs to the application and routinely sits behind a
+            # directory an unprivileged caller may not enter (exim4 keeps
+            # /run/exim4 at 0750). We answer that correctly from our own state,
+            # so it is not worth a warning on every query - one of our own files
+            # that we cannot stat still is.
+            if ours:
+                logg.warning("can not stat %s >> %s", filename, e)
+            else:
+                logg.debug("can not stat %s >> %s", filename, e)
             if conf is not None:
                 conf.state_unreadable = True
             return False
