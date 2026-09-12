@@ -6779,6 +6779,14 @@ class Systemctl:
         except OSError as e:
             logg.warning("SIGQUIT to init-loop on PID-1 >> %s", e)
         return done
+    def poweroff_target(self, arg: bool = True) -> bool:
+        """ poweroff -- stop units from default system level and power off """
+        logg.info("system poweroff requested - %s", arg)
+        return self.halt_target(arg)
+    def reboot_target(self, arg: bool = True) -> bool:
+        """ reboot -- stop units from default system level and reboot """
+        logg.info("system reboot requested - %s", arg)
+        return self.halt_target(arg)
     def system_get_default(self) -> str:
         """ get current default run-level"""
         return self.get_default_target()
@@ -7499,6 +7507,10 @@ def runcommand(command: str, *modules: str) -> int:
         print_str(systemctl.unitfiles.get_preset_of_unit(*modules))
     elif command in ["halt"]:
         exitcode = is_not_ok(systemctl.halt_target())
+    elif command in ["poweroff"]:
+        exitcode = is_not_ok(systemctl.poweroff_target())
+    elif command in ["reboot"]:
+        exitcode = is_not_ok(systemctl.reboot_target())
     elif command in ["init"]:
         exitcode = is_not_ok(systemctl.init_modules(*modules))
     elif command in ["is-active"]:
