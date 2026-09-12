@@ -780,6 +780,82 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def _status_conf(self, tmp: str, unit: str = "zz1.service") -> Any: # type: ignore[explicit-any]
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/{unit}", """
+        [Service]
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf(unit)
+    def test_0420(self) -> None:
+        """ the status file must be readable whatever umask we were called with -
+            an unreadable one makes a running service look stopped """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        old = os.umask(0o077)
+        try:
+            systemctl.write_status_from(conf, MainPID=1234)
+        finally:
+            os.umask(old)
+        status_file = systemctl.get_status_file_from(conf)
+        mode = os.stat(status_file).st_mode & 0o777
+        self.assertEq(mode & 0o044, 0o044, F"mode is {mode:04o}")
+        self.rm_testdir()
+    def test_0421(self) -> None:
+        """ read bits are added, never taken away - a mode widened on purpose stays """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        systemctl.write_status_from(conf, MainPID=1234)
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o664)
+        systemctl.write_status_from(conf, MainPID=1235)
+        self.assertEq(os.stat(status_file).st_mode & 0o777, 0o664)
+        self.rm_testdir()
+    def test_0422(self) -> None:
+        """ the status file is our own state, never a symlink - writing through one
+            overwrites whatever it points at """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        status_file = systemctl.get_status_file_from(conf)
+        os.makedirs(os.path.dirname(status_file), exist_ok=True)
+        victim = F"{tmp}/victim.txt"
+        text_file(victim, "SECRET\n")
+        os.symlink(os.path.abspath(victim), status_file) # must be resolvable
+        self.assertEq(os.path.exists(status_file), True) # not a dangling link
+        systemctl.write_status_from(conf, MainPID=1234)
+        self.assertEq(open(victim).read(), "SECRET\n")
+        self.rm_testdir()
+    def test_0423(self) -> None:
+        """ a read-only command must not truncate a foreign file through a symlink
+            either - shutil_truncate runs from is-active and show """
+        tmp = self.testdir()
+        victim = F"{tmp}/victim.txt"
+        text_file(victim, "SECRET\n")
+        link = F"{tmp}/link.status"
+        os.symlink(os.path.abspath(victim), link)
+        self.assertEq(os.path.exists(link), True) # not a dangling link
+        try:
+            app.shutil_truncate(link)
+        except OSError:
+            pass
+        self.assertEq(open(victim).read(), "SECRET\n")
+        self.rm_testdir()
+    def test_0424(self) -> None:
+        """ a runtime directory of ours must be enterable whatever the umask was """
+        tmp = self.testdir()
+        folder = F"{tmp}/run/systemd"
+        old = os.umask(0o077)
+        try:
+            app.makedirs_mode(folder)
+        finally:
+            os.umask(old)
+        mode = os.stat(folder).st_mode & 0o777
+        self.assertEq(mode & 0o055, 0o055, F"mode is {mode:04o}")
+        app.makedirs_mode(folder) # again on an existing directory must not raise
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
