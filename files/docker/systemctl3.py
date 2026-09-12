@@ -6608,7 +6608,7 @@ class Systemctl:
         if prop in ("name","names","list"):
             return unit
         if prop in ("path","file","files"):
-            return conf.filename()
+            return strE(conf.filename())
         val = conf.get("Unit", prop, NIX)
         if val is NIX:
             if unit.endswith(".service"):
