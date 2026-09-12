@@ -160,7 +160,7 @@ _ignore_units: Dict[str, Dict[str, str]] = {
       postfix*
     """,
     "ubuntu": """
-      network*
+      mount*
       umount*
       ondemand
       *.local
