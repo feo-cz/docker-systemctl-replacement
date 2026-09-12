@@ -780,6 +780,60 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def _scan_units(self, tmp):
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zza.service", """
+        [Unit]
+        Description = the first description
+        [Service]
+        ExecStart = /bin/true""")
+        text_file(F"{sysd}/zzb.service", """
+        [Unit]
+        Description = about to be removed
+        [Service]
+        ExecStart = /bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit, sysd
+    def test_0500(self) -> None:
+        """ scan_unit_files(reload=True) is what a daemon-reload is made of, and
+            systemctl(1) says that rereads the unit files and recreates the tree.
+            It only ever added to what it had, so a unit whose file is gone stayed
+            listed for the life of the manager. """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        self.assertEqual(sorted(n for n in unit.scan_unit_files() if n.startswith("zz")),
+                         ["zza.service", "zzb.service"])
+        os.remove(F"{sysd}/zzb.service")
+        self.assertEqual(sorted(n for n in unit.scan_unit_files(reload=True) if n.startswith("zz")),
+                         ["zza.service"])
+        self.rm_testdir()
+    def test_0501(self) -> None:
+        """ ... and a unit file that changed is read again, not served from the
+            conf it was parsed into the first time """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        unit.scan_unit_files()
+        self.assertEqual(unit.get_Description(unit.get_conf("zza.service")), "the first description")
+        text_file(F"{sysd}/zza.service", """
+        [Unit]
+        Description = the second description
+        [Service]
+        ExecStart = /bin/true""")
+        unit.scan_unit_files(reload=True)
+        self.assertEqual(unit.get_Description(unit.get_conf("zza.service")), "the second description")
+        self.rm_testdir()
+    def test_0502(self) -> None:
+        """ ... and without reload nothing is rescanned at all, which is the
+            other half of the contract: systemd reads the disk on daemon-reload
+            and not on every question asked of it """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        unit.scan_unit_files()
+        os.remove(F"{sysd}/zzb.service")
+        self.assertIn("zzb.service", unit.scan_unit_files())
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

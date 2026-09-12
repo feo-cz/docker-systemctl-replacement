@@ -1469,6 +1469,15 @@ class SystemctlUnitFiles:
         """ reads all unit files, returns the first filename for the unit given """
         if not self._loaded_unit_files or reload:
             self._loaded_unit_files = time.time()
+            if reload:
+                # a daemon-reload "will rerun all generators, reload all unit files,
+                # and recreate the entire dependency tree" (systemctl(1)). Merging
+                # into what we already knew keeps a unit whose file has been removed
+                # and serves the content a file had when it was first read.
+                self._file_for_unit = {}
+                self._alias_for_unit = {}
+                self._loaded_unit_conf = {}
+                self._loaded_instance_conf = {}
             found = 0
             for folder in self.unit_file_folders():
                 if not folder:
@@ -1487,6 +1496,9 @@ class SystemctlUnitFiles:
         """ reads all init.d files, returns the first filename when unit is a '.service' """
         if not self._loaded_sysv_files or reload:
             self._loaded_sysv_files = time.time()
+            if reload:
+                self._file_for_sysv = {}
+                self._loaded_sysv_conf = {}
             found = 0
             for folder in self.init_folders():
                 if not folder:
