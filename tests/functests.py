@@ -11,6 +11,7 @@ import sys
 import re
 import shutil
 import inspect
+import signal
 import unittest
 import logging
 import os.path
@@ -793,6 +794,53 @@ class AppUnitTest(unittest.TestCase):
         for name in ["/usr/bin/systemctl", "/bin/systemctl.docker", "systemctl",
                      "files/docker/systemctl3.py", "/sbin/init", "/sbin/rebooted"]:
             self.assertEqual(app.command_of_prog(name), "")
+        self.rm_testdir()
+    def _no_pid1_signal(self):
+        """ halt/poweroff/reboot end with a SIGQUIT to PID 1 to leave the init loop.
+            Record that signal instead of sending it - this test suite runs inside
+            a container whose PID 1 we must not touch. """
+        sent = []
+        real_kill = os.kill
+        os.kill = lambda pid, sig: sent.append((pid, sig)) # type: ignore[assignment]
+        return sent, real_kill
+    def test_0482(self) -> None:
+        """ systemctl(1) documents reboot and poweroff next to halt; we only had
+            halt, so 'systemctl reboot' was an unknown operation. In a container
+            all three mean the same thing: stop the units and end the init loop,
+            after which the supervisor decides what happens next. """
+        tmp = self.testdir()
+        os.makedirs(F"{tmp}/etc/systemd/system")
+        for verb in ["halt", "poweroff", "reboot"]:
+            systemctl = app.Systemctl()
+            systemctl._root = tmp # pylint: disable=protected-access
+            systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+            sent, real_kill = self._no_pid1_signal()
+            try:
+                getattr(systemctl, verb + "_target")()
+            finally:
+                os.kill = real_kill # type: ignore[assignment]
+            self.assertEqual(sent, [(1, signal.SIGQUIT)], verb)
+        self.rm_testdir()
+    def test_0483(self) -> None:
+        """ ... and the three are reachable as commands, which is what the /sbin
+            symlinks end up calling """
+        tmp = self.testdir()
+        os.makedirs(F"{tmp}/etc/systemd/system")
+        root = app._root # pylint: disable=protected-access
+        app._root = tmp # pylint: disable=protected-access
+        try:
+            for verb in ["halt", "poweroff", "reboot"]:
+                sent, real_kill = self._no_pid1_signal()
+                try:
+                    app.runcommand(verb)
+                finally:
+                    os.kill = real_kill # type: ignore[assignment]
+                # the signal is the proof the command was dispatched and ran;
+                # its exit code is a separate matter (stop_system_default reports
+                # failure when there was nothing running to stop)
+                self.assertEqual(sent, [(1, signal.SIGQUIT)], verb)
+        finally:
+            app._root = root # pylint: disable=protected-access
         self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
