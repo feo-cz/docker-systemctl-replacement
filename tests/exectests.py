@@ -14209,6 +14209,92 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_3730_systemctl_py_failing_child_leaves_the_parent_alone(self) -> None:
+        """ a fork child that cannot exec has to leave by os._exit. Leaving by
+            sys.exit unwinds the stack it inherited from the parent, which runs
+            the parent's cleanup inside the child - waitlock.__exit__ among it,
+            releasing a flock the parent still believes it holds. REMOVE_LOCK_FILE
+            makes that footprint visible: the child removes the lock file and the
+            parent then cannot. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(testdir, "zzw.service"), """
+            [Unit]
+            Description=Testing W
+            [Service]
+            Type=simple
+            WorkingDirectory=/there/is/no/such/directory
+            ExecStart=/bin/sleep 30
+            """)
+        copy_file(os_path(testdir, "zzw.service"), os_path(root, "/etc/systemd/system/zzw.service"))
+        #
+        cmd = "{systemctl} start zzw.service -vvv -c REMOVE_LOCK_FILE=1"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, out, err)
+        self.assertEqual(end, 1) # the unit does fail to start, that is the point
+        # the child redirects its own output into the journal of the unit before
+        # it gets as far as the workingdir, so that is where it is visible
+        journal = lines(reads(os_path(root, "/var/log/journal/zzw.service.log")))
+        logg.info("journal>\n\t%s", "\n\t".join(journal))
+        self.assertTrue(greps(journal, "bad workingdir")) # the child is the one that found out
+        self.assertFalse(greps(journal, "lockfile removed")) # and it left the parent's lock alone
+        self.assertTrue(greps(err, "lockfile removed")) # which the parent then removes itself
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_3740_systemctl_py_shutdown_signal_during_startup(self) -> None:
+        """ the manager has to listen for a shutdown signal from the moment it
+            starts working, not from the moment it is done starting units.
+            systemd(1) puts its handlers up "very early during boot" and says so
+            over sd_notify, because a signal that arrives before that is simply
+            gone - PID 1 receives only the signals it has a handler for. Ours went
+            up after the units, which on a real container is several seconds in
+            which the manager cannot be asked to stop. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(testdir, "zzslow.service"), """
+            [Unit]
+            Description=Testing slow to start
+            [Service]
+            Type=simple
+            ExecStartPre=/bin/sleep 6
+            ExecStart=/bin/sleep 60
+            """)
+        copy_file(os_path(testdir, "zzslow.service"), os_path(root, "/etc/systemd/system/zzslow.service"))
+        #
+        log_stdout = os.path.join(root, "systemctl.stdout.log")
+        log_stderr = os.path.join(root, "systemctl.stderr.log")
+        pid = os.fork()
+        if not pid:
+            new_stdout = os.open(log_stdout, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            new_stderr = os.open(log_stderr, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            os.dup2(new_stdout, 1)
+            os.dup2(new_stderr, 2)
+            systemctl_cmd = [_systemctl_py, "--root="+root, "init", "zzslow.service", "-vv"]
+            systemctl_cmd += ["-c", "InitLoopSleep=1"]
+            os.execve(_systemctl_py, systemctl_cmd, os.environ.copy())
+        time.sleep(2) # well inside the six seconds of ExecStartPre
+        os.kill(pid, signal.SIGTERM)
+        done, status = os.waitpid(pid, 0)
+        txt_stderr = lines(open(log_stderr))
+        logg.info("-- %s>\n\t%s", log_stderr, "\n\t".join(txt_stderr))
+        #
+        self.assertFalse(os.WIFSIGNALED(status)) # not killed where it stood
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0) # a shutdown that was asked for
+        self.assertTrue(greps(txt_stderr, "interrupted"))
+        self.assertTrue(greps(txt_stderr, "init is done"))
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def real_3801_start_some_unknown(self) -> None:
         self.test_3801_start_some_unknown(True)
     def test_3801_start_some_unknown(self, real: bool = False) -> None:

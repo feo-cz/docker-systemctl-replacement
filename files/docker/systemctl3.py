@@ -4162,14 +4162,24 @@ class Systemctl:
         self.wait_system()
         done = True
         started_units = []
-        for unit in self.unitfiles.sorted_after(units):
-            started_units.append(unit)
-            if not self.start_unit(unit):
-                done = False
         if init:
-            logg.info("init-loop start")
-            sig = self.init_loop_until_stop(started_units)
-            logg.info("init-loop %s", sig)
+            self.install_signal_handlers()
+        interrupted = ""
+        try:
+            for unit in self.unitfiles.sorted_after(units):
+                started_units.append(unit)
+                if not self.start_unit(unit):
+                    done = False
+        except KeyboardInterrupt as e:
+            if not init:
+                raise # a Control-C outside the init mode is not ours to swallow
+            interrupted = str(e) or "STOPPED"
+            logg.info("[init] interrupted while starting units - %s", interrupted)
+        if init:
+            if not interrupted:
+                logg.info("init-loop start")
+                sig = self.init_loop_until_stop(started_units)
+                logg.info("init-loop %s", sig)
             for unit in reversed(started_units):
                 self.stop_unit(unit)
         return done
@@ -4752,6 +4762,14 @@ class Systemctl:
         return self.unitfiles.get_PermissionsStartOnly(conf) or exe.nouser
     def execve_from(self, conf: SystemctlConf, cmd: List[str], env: Dict[str, str], runAsRoot: bool = False) -> NoReturn:
         """ this code is commonly run in a child process // returns exit-code"""
+        # a fork child inherits the handlers and the stack of its parent. Leave both
+        # behind before doing anything else: a signal arriving between the fork and
+        # the exec would otherwise raise KeyboardInterrupt here and unwind frames
+        # that belong to the manager, and every exit below is os._exit for the same
+        # reason - sys.exit would run the parent's waitlock.__exit__ inside the
+        # child, releasing a flock the parent still believes it holds.
+        for signum in (signal.SIGQUIT, signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, signal.SIG_DFL)
         runs = conf.get(Service, "Type", "simple").lower()
         # logg.debug("%s process for %s => %s", runs, strE(conf.name()), strQ(conf.filename()))
         self.dup2_journal_log(conf)
@@ -4767,20 +4785,20 @@ class Systemctl:
         badpath = self.chdir_workingdir(conf) # some dirs need setuid before
         if badpath:
             logg.error("(%s): bad workingdir: '%s'", shell_cmd(cmd), badpath)
-            sys.exit(1)
+            os._exit(1)
         env = self.extend_exec_env(env)
         env.update(envs) # set $HOME to ~$USER
         try:
             if EXEC_SPAWN:
                 cmd_args = [arg for arg in cmd] # satisfy mypy
                 exitcode = os.spawnvpe(os.P_WAIT, cmd[0], cmd_args, env)
-                sys.exit(exitcode)
+                os._exit(exitcode)
             else: # pragma: no cover
                 os.execve(cmd[0], cmd, env)
-                sys.exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
+                os._exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
         except (OSError, RuntimeError) as e:
             logg.error("(%s) >> %s", shell_cmd(cmd), e)
-            sys.exit(1)
+            os._exit(1)
     def test_start_unit(self, unit: str) -> None:
         """ helper function to test the code that is normally forked off """
         conf = self.unitfiles.load_conf(unit)
@@ -6723,12 +6741,23 @@ class Systemctl:
             When --init is given then the init-loop is run and
             the services are stopped again by 'systemctl halt'."""
         target = self.get_default_target()
-        services = self.start_target_system(target, init)
+        if init:
+            self.install_signal_handlers()
+        interrupted = ""
+        try:
+            services = self.start_target_system(target, init)
+        except KeyboardInterrupt as e:
+            if not init:
+                raise # a Control-C outside the init mode is not ours to swallow
+            interrupted = str(e) or "STOPPED"
+            logg.info("[init] interrupted while starting - %s", interrupted)
+            services = self.target_default_services(target, "S")
         logg.info("%s system is up", target)
         if init:
-            logg.info("init-loop start")
-            sig = self.init_loop_until_stop(services)
-            logg.info("init-loop %s", sig)
+            if not interrupted:
+                logg.info("init-loop start")
+                sig = self.init_loop_until_stop(services)
+                logg.info("init-loop %s", sig)
             self.stop_system_default()
         return not not services
     def start_target_system(self, target: str, init: int = False) -> List[str]:
@@ -6995,15 +7024,22 @@ class Systemctl:
                    me, ["%+.3fs" % (t - now) for t in self._restart_failed_units.values()])
         return restart_done
 
+    def install_signal_handlers(self) -> None:
+        """ the signals that ask the manager to shut down. systemd(1) has these in
+            place "very early during boot" and announces over sd_notify when they
+            are, because a signal that arrives before that is gone without a trace:
+            PID 1 receives only the signals it has installed a handler for (kill(2),
+            NOTES). So these go up before the units are started, not after. """
+        signal.signal(signal.SIGQUIT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGQUIT"))
+        signal.signal(signal.SIGINT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGINT"))
+        signal.signal(signal.SIGTERM, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGTERM"))
     def init_loop_until_stop(self, units: List[str]) -> Optional[str]:
         """ this is the init-loop - it checks for any zombies to be reaped and
             waits for an interrupt. When a SIGTERM /SIGINT /Control-C signal
             is received then the signal name is returned. Any other signal will
             just raise an Exception like one would normally expect. As a special
             the 'systemctl halt' emits SIGQUIT which puts it into no_more_procs mode."""
-        signal.signal(signal.SIGQUIT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGQUIT"))
-        signal.signal(signal.SIGINT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGINT"))
-        signal.signal(signal.SIGTERM, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGTERM"))
+        self.install_signal_handlers()
         result: Optional[str] = None
         #
         self.journal.start_log_files(units)
