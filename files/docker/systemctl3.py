@@ -187,6 +187,10 @@ SystemCompatibilityVersion: int = 219
 SysInitTarget: str = "sysinit.target"
 SysInitWait: int = 5 # max for target
 MinimumYield: float = 0.5
+# how finely a wait that counts down against a deadline looks again. Not to be
+# confused with the "for attempt in range(timeout)" loops elsewhere, where the
+# one second IS the unit being counted and must stay a second.
+WaitPollSec: float = 0.05
 MinimumTimeoutStartSec: int = 4
 MinimumTimeoutStopSec: int = 4
 DefaultTimeoutStartSec: int = 90   # official value
