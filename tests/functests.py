@@ -780,6 +780,110 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def test_0350(self) -> None:
+        """ PermissionsStartOnly=yes is off by default """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        self.assertEq(unit.get_PermissionsStartOnly(conf), False)
+        self.rm_testdir()
+    def test_0351(self) -> None:
+        """ PermissionsStartOnly=yes is read from the [Service] section """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        PermissionsStartOnly = yes
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        self.assertEq(unit.get_PermissionsStartOnly(conf), True)
+        self.assertEq(unit.get_User(conf), "someone")
+        self.rm_testdir()
+    def test_0352(self) -> None:
+        """ the '+' prefix of an Exec line is reported as nouser, so that the
+            step runs privileged even when the service has a User= """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStartPre = +/usr/bin/true
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        env = unit.get_env(conf)
+        for cmd in conf.getlist("Service", "ExecStartPre", []):
+            exe, newcmd = unit.expand_cmd(cmd, env, conf)
+            self.assertEq(newcmd, ["/usr/bin/true"])
+            self.assertEq(exe.nouser, True)
+        for cmd in conf.getlist("Service", "ExecStart", []):
+            exe, newcmd = unit.expand_cmd(cmd, env, conf)
+            self.assertEq(exe.nouser, False)
+        self.rm_testdir()
+    def test_0354(self) -> None:
+        """ run_as_root() is the decision the Exec steps make: either the unit says
+            PermissionsStartOnly=yes, or the single step is prefixed with '+' """
+        tmp = self.testdir()
+        svc1, svc2 = "test1.service", "test2.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStartPre = +/usr/bin/true
+        ExecStart = /usr/bin/true""")
+        text_file(F"{tmp}/{svc2}", """
+        [Service]
+        User = someone
+        PermissionsStartOnly = yes
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        unit.add_unit_file(svc2, F"{tmp}/{svc2}")
+        systemctl = app.Systemctl()
+        conf1 = unit.get_conf(svc1)
+        env1 = unit.get_env(conf1)
+        pre = conf1.getlist("Service", "ExecStartPre", [])[0]
+        exe, newcmd = unit.expand_cmd(pre, env1, conf1)
+        self.assertEq(systemctl.run_as_root(conf1, exe), True)   # '+' prefix
+        start = conf1.getlist("Service", "ExecStart", [])[0]
+        exe, newcmd = unit.expand_cmd(start, env1, conf1)
+        self.assertEq(systemctl.run_as_root(conf1, exe), False)  # plain, has User=
+        conf2 = unit.get_conf(svc2)
+        env2 = unit.get_env(conf2)
+        start = conf2.getlist("Service", "ExecStart", [])[0]
+        exe, newcmd = unit.expand_cmd(start, env2, conf2)
+        self.assertEq(systemctl.run_as_root(conf2, exe), True)   # PermissionsStartOnly
+        self.rm_testdir()
+    def test_0353(self) -> None:
+        """ '!' is the other spelling of the same thing, and the prefixes
+            combine with '-' (no-check) in any order """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStartPre = !/usr/bin/true
+        ExecStartPost = -+/usr/bin/true
+        ExecStop = +-/usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        env = unit.get_env(conf)
+        for name, nouser, check in [("ExecStartPre", True, True), ("ExecStartPost", True, False), ("ExecStop", True, False)]:
+            for cmd in conf.getlist("Service", name, []):
+                exe, newcmd = unit.expand_cmd(cmd, env, conf)
+                self.assertEq(newcmd, ["/usr/bin/true"], name)
+                self.assertEq(exe.nouser, nouser, name)
+                self.assertEq(exe.check, check, name)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

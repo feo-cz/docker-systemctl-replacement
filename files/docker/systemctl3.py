@@ -4019,9 +4019,7 @@ class Systemctl:
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid: 
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -4197,9 +4195,7 @@ class Systemctl:
                 logg.info("post-fail %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-fail done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -4212,9 +4208,7 @@ class Systemctl:
                 logg.info("post-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-start done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -4326,9 +4320,7 @@ class Systemctl:
                 logg.info("%s pre-start %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid: 
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("%s pre-start done (%s) <-%s>", runs,
                            run.returncode or "OK", run.signal or "")
@@ -4368,9 +4360,7 @@ class Systemctl:
                 logg.info("%s post-fail %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("%s post-fail done (%s) <-%s>", runs,
                            run.returncode or "OK", run.signal or "")
@@ -4381,9 +4371,7 @@ class Systemctl:
                 logg.info("%s post-start %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("%s post-start done (%s) <-%s>", runs,
                            run.returncode or "OK", run.signal or "")
@@ -4523,6 +4511,11 @@ class Systemctl:
             os.dup2(std.out.fileno(), sys.stdout.fileno())
             os.dup2(std.err.fileno(), sys.stderr.fileno())
         # implicit: std.inp.close(), std.out.close(), std.err.close()
+    def run_as_root(self, conf: SystemctlConf, exe: ExecMode) -> bool:
+        """ an Exec line prefixed with '+' (or '!') runs with full privileges even
+            when the unit has a User=, and PermissionsStartOnly=yes says the same
+            for every step except ExecStart itself. """
+        return self.unitfiles.get_PermissionsStartOnly(conf) or exe.nouser
     def execve_from(self, conf: SystemctlConf, cmd: List[str], env: Dict[str, str], runAsRoot: bool = False) -> NoReturn:
         """ this code is commonly run in a child process // returns exit-code"""
         runs = conf.get(Service, "Type", "simple").lower()
@@ -4735,9 +4728,7 @@ class Systemctl:
                 logg.info("post-stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
@@ -4776,9 +4767,7 @@ class Systemctl:
                 logg.info("post-stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
-                    permissionsStartOnly = self.unitfiles.get_PermissionsStartOnly(conf)
-                    runAsRoot = permissionsStartOnly or exe.nouser
-                    self.execve_from(conf, newcmd, env, runAsRoot) # pragma: no cover
+                    self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("post-stop done (%s) <-%s>",
                            run.returncode or "OK", run.signal or "")
