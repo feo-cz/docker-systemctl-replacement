@@ -11,6 +11,8 @@ import sys
 import re
 import shutil
 import inspect
+import time
+import signal
 import unittest
 import logging
 import os.path
@@ -779,6 +781,141 @@ class AppUnitTest(unittest.TestCase):
         conf = unit.get_conf(svc1)
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
+        self.rm_testdir()
+    def _killmode_unit(self, tmp, killmode, mainpid, pidlist, dies = None, timeout = 4):
+        """ do_kill_unit_from is driven by pidlist_of() and pid_exists(), so a fake
+            process table is enough to observe which pids it signals and which ones
+            it waits for. 'dies' are the pids that react to the friendly signal, the
+            others only to SIGKILL. Returns (systemctl, conf, alive, killed). """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzk.service", F"""
+        [Service]
+        ExecStart = /usr/bin/true
+        KillMode = {killmode}
+        TimeoutStopSec = {timeout}""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        conf = systemctl.unitfiles.get_conf("zzk.service")
+        systemctl.write_status_from(conf, MainPID=mainpid)
+        alive = set(pidlist)
+        obedient = set([mainpid] if dies is None else dies)
+        killed = []
+        def kill_pid(pid, kill_signal = None):
+            killed.append((pid, kill_signal))
+            if pid in obedient or kill_signal == signal.SIGKILL:
+                alive.discard(pid)
+            return pid not in alive
+        systemctl.pidlist_of = lambda pid: list(pidlist) # type: ignore[method-assign]
+        systemctl._kill_pid = kill_pid # type: ignore[method-assign] # pylint: disable=protected-access
+        return systemctl, conf, alive, killed
+    def _fake_pids(self, alive):
+        """ patches the module-wide process lookups against a fake process table """
+        pid_exists, pid_zombie = app.pid_exists, app.pid_zombie
+        app.pid_exists = lambda pid: pid in alive
+        app.pid_zombie = lambda pid: False
+        return pid_exists, pid_zombie
+    def _real_pids(self, saved):
+        app.pid_exists, app.pid_zombie = saved
+    def test_0450(self) -> None:
+        """ KillMode=control-group - all remaining processes of the unit are killed """
+        self.assertEqual(app.killmode_pidlist("control-group", 11, [11, 22, 33]), [11, 22, 33])
+        self.assertEqual(app.killmode_pidlist("control-group", 11, [11, 22, 33], sigkill=True), [11, 22, 33])
+    def test_0451(self) -> None:
+        """ KillMode=process - only the main process itself is killed, and the later
+            SIGKILL does not widen that (systemd.kill(5)) """
+        self.assertEqual(app.killmode_pidlist("process", 11, [11, 22, 33]), [11])
+        self.assertEqual(app.killmode_pidlist("process", 11, [11, 22, 33], sigkill=True), [11])
+    def test_0452(self) -> None:
+        """ KillMode=mixed - SIGTERM goes to the main process while the subsequent
+            SIGKILL is sent to all remaining processes (systemd.kill(5)) """
+        self.assertEqual(app.killmode_pidlist("mixed", 11, [11, 22, 33]), [11])
+        self.assertEqual(app.killmode_pidlist("mixed", 11, [11, 22, 33], sigkill=True), [11, 22, 33])
+    def test_0453(self) -> None:
+        """ KillMode=none - no process is killed, only the stop command is executed """
+        self.assertEqual(app.killmode_pidlist("none", 11, [11, 22, 33]), [])
+        self.assertEqual(app.killmode_pidlist("none", 11, [11, 22, 33], sigkill=True), [])
+    def test_0454(self) -> None:
+        """ KillMode=process must not wait for processes it never signalled. Debian
+            ships ssh.service, cron.service and puppet.service that way so that the
+            established sessions survive - waiting for them burns TimeoutStopSec on
+            every shutdown and the container ends up being SIGKILLed from outside. """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "process", 11, [11, 22])
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM)])
+        self.assertEqual(alive, set([22])) # the session process is left alone
+        self.assertTrue(done)
+        self.assertLess(lapse, 2) # not TimeoutStopSec=4
+        self.rm_testdir()
+    def test_0455(self) -> None:
+        """ KillMode=none kills nothing at all - not even the main process """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "none", 11, [11, 22])
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [])
+        self.assertEqual(alive, set([11, 22]))
+        self.assertTrue(done)
+        self.assertLess(lapse, 2)
+        self.rm_testdir()
+    def test_0456(self) -> None:
+        """ KillMode=control-group stays as it was - every process of the unit gets
+            the kill signal """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "control-group", 11, [11, 22], dies=[11, 22])
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (22, signal.SIGTERM)])
+        self.assertEqual(alive, set())
+        self.assertTrue(done)
+        self.assertLess(lapse, 2)
+        self.rm_testdir()
+    def test_0458(self) -> None:
+        """ KillMode=control-group does wait for the other processes as well, and it
+            escalates to SIGKILL for the ones that did not react """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "control-group", 11, [11, 22], timeout=1)
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (22, signal.SIGTERM), (22, signal.SIGKILL)])
+        self.assertTrue(done)
+        self.assertGreaterEqual(lapse, 1) # it did wait for TimeoutStopSec
+        self.rm_testdir()
+    def test_0457(self) -> None:
+        """ SendSIGHUP follows the KillMode set, not the whole process list - systemd
+            sends it right after the kill signal, to the same processes """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "process", 11, [11, 22])
+        conf.set("Service", "SendSIGHUP", "yes")
+        saved = self._fake_pids(alive)
+        try:
+            systemctl.do_kill_unit_from(conf)
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (11, signal.SIGHUP)])
         self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
