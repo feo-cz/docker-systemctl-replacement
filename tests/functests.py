@@ -961,11 +961,24 @@ class AppUnitTest(unittest.TestCase):
         finally:
             os.chmod(F"{tmp}/piddir", 0o755)
         self.rm_testdir()
+    def _nopidfile_unit(self, tmp: str) -> Any: # type: ignore[explicit-any]
+        """ a unit with no PIDFile= at all - there is nobody else to ask, so our own
+            state is the only source there is """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzq.service", """
+        [Service]
+        Type = simple
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzq.service")
     def test_0446(self) -> None:
-        """ unknown is kept for the case it was meant for: our OWN state is what we
-            cannot read """
+        """ unknown is kept for the case it was meant for: there is no PIDFile to
+            ask, and our OWN state is what we cannot read """
         tmp = self.testdir()
-        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl, conf = self._nopidfile_unit(tmp)
         systemctl.write_status_from(conf, MainPID=os.getpid())
         conf.status = None
         status_file = systemctl.get_status_file_from(conf)
@@ -974,6 +987,37 @@ class AppUnitTest(unittest.TestCase):
             self.assertEq(systemctl.get_active_from(conf), "unknown")
         finally:
             os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0448(self) -> None:
+        """ ... but when the unit does declare a PIDFile= and that file is absent,
+            the application has answered and we do not need our own state at all -
+            not even when we cannot read it """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid())
+        conf.status = None
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "inactive")
+        finally:
+            os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0447(self) -> None:
+        """ a PIDFile that is simply ABSENT is a different answer from one we may
+            not read. Absent means the application says it is not running, and that
+            is complete - our own state must not override it, or a service that
+            ended by itself gets reported as failed. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        dead = os.fork()
+        if not dead:
+            os._exit(0) # pylint: disable=protected-access
+        os.waitpid(dead, 0)
+        systemctl.write_status_from(conf, MainPID=dead)
+        conf.status = None
+        self.assertEq(systemctl.get_active_from(conf), "inactive")
+        self.assertEq(systemctl.get_substate_from(conf), "dead")
         self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()

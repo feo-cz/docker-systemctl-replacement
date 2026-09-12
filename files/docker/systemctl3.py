@@ -5382,8 +5382,14 @@ class Systemctl:
         if pid_file: # application PIDFile
             conf.state_unreadable = False
             if not self.is_readable_file(pid_file, conf, ours=False):
+                if not conf.state_unreadable:
+                    # the file is absent, not unreadable. That is the application
+                    # saying it is not running, and it is a complete answer - our
+                    # own state must not override it or a service that ended by
+                    # itself is reported as failed
+                    return "inactive"
                 if not self.have_status_of(conf):
-                    return "inactive" # never started here - a complete answer
+                    return "inactive" # unreadable, and never started here - also complete
                 conf.state_unreadable = False # our own state answers below
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
@@ -5437,8 +5443,14 @@ class Systemctl:
         if pid_file:
             conf.state_unreadable = False
             if not self.is_readable_file(pid_file, conf, ours=False):
+                if not conf.state_unreadable:
+                    # the file is absent, not unreadable. That is the application
+                    # saying it is not running, and it is a complete answer - our
+                    # own state must not override it or a service that ended by
+                    # itself is reported as failed
+                    return "dead"
                 if not self.have_status_of(conf):
-                    return "dead" # never started here - a complete answer
+                    return "dead" # unreadable, and never started here - also complete
                 conf.state_unreadable = False # our own state answers below
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
