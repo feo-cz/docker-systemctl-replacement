@@ -5989,7 +5989,12 @@ class Systemctl:
             _f = self._force and "-f" or ""
             logg.info("rm %s %s", _f, strQ(target))
         if os.path.islink(target):
-            os.remove(target)
+            link_target = os.readlink(target)
+            if link_target == _dev_null:
+                os.remove(target)
+                logg.info("Unit %s was masked and has been unmasked.", unit)
+            else:
+                logg.info("Unit %s is not masked (symlink points to %s); nothing to do.", unit, link_target)
             return True
         elif not os.path.exists(target):
             logg.debug("Symlink did not exist anymore: %s", target)
