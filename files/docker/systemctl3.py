@@ -7623,12 +7623,12 @@ def runcommand(command: str, *modules: str) -> int:
     elif command in ["get-environment"]:
         result = systemctl.get_environment_modules(*modules)
         assert result is not None
-        if isinstance(result, int): exitcode = result 
+        if isinstance(result, int): exitcode = result
         elif isinstance(result, str): print_str(result)
     elif command in ["set-environment"]:
         exitcode = systemctl.set_environment_modules(*modules)
     elif command in ["unset-environment"]:
-        exitcode = systemctl.unset_environment_modules(*modules)        
+        exitcode = systemctl.unset_environment_modules(*modules)
     elif command in ["get-default"]:
         print_str(systemctl.get_default_target())
     elif command in ["get-preset"]:
