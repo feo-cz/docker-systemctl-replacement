@@ -825,7 +825,10 @@ class SystemctlBaseTest(unittest.TestCase):
         out, err, end = output3(cmd.format(**locals()))
         logg.info("%s\n%s\n%s", cmd, out, err)
         self.assertEqual(end, 0)
-        self.assertTrue(greps(out, "__test_float =  return 'Unknown result type'"))
+        # one space or two is up to the interpreter: Python 3.13 strips the leading
+        # indent off a docstring, older ones keep it. What the test is about is that
+        # help shows the command and the text of its docstring.
+        self.assertTrue(greps(out, "__test_float = +return 'Unknown result type'"))
         self.coverage()
     def test_1010_systemctl_daemon_reload(self) -> None:
         """ daemon-reload always succeeds (does nothing) """
@@ -7432,6 +7435,11 @@ class SystemctlBaseTest(unittest.TestCase):
         ##
     def test_2717_create_other_group_state(self) -> None:
         """ check when create and clean StateDirectory with Group= settings """
+        if os.geteuid() and get_LASTGROUP_ID() == get_GROUP_ID():
+            # the test tells the two units apart by giving them different groups.
+            # A user who is a member of exactly one group has no second group to
+            # give, so both units get the same and there is nothing to compare.
+            self.skipTest("this user is in a single group")
         # if not running as 'root' then it may actually change the directory group
         testname = self.testname()
         testdir = self.testdir()
