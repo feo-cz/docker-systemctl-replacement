@@ -4811,9 +4811,14 @@ class Systemctl:
     def dup2_journal_log(self, conf: SystemctlConf) -> None:
         std = self.journal.open_standard_log(conf)
         if EXEC_DUP2:
-            os.dup2(std.inp.fileno(), sys.stdin.fileno())
-            os.dup2(std.out.fileno(), sys.stdout.fileno())
-            os.dup2(std.err.fileno(), sys.stderr.fileno())
+            # the standard descriptors by number, not whatever sys.stdout happens
+            # to be bound to. It is the descriptors that the exec'd program will
+            # inherit, and an object put in sys.stdout's place by a test runner or
+            # an embedding does not have to have one at all - asking it for a
+            # fileno() then raises inside the fork child.
+            os.dup2(std.inp.fileno(), 0)
+            os.dup2(std.out.fileno(), 1)
+            os.dup2(std.err.fileno(), 2)
         # implicit: std.inp.close(), std.out.close(), std.err.close()
     def run_as_root(self, conf: SystemctlConf, exe: ExecMode) -> bool:
         """ an Exec line prefixed with '+' (or '!') runs with full privileges even
@@ -4830,35 +4835,43 @@ class Systemctl:
         # child, releasing a flock the parent still believes it holds.
         for signum in (signal.SIGQUIT, signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_DFL)
-        runs = conf.get(Service, "Type", "simple").lower()
-        # logg.debug("%s process for %s => %s", runs, strE(conf.name()), strQ(conf.filename()))
-        self.dup2_journal_log(conf)
-        cmd_args: List[Union[str, bytes]] = []
-        #
-        runuser = self.unitfiles.get_User(conf)
-        rungroup = self.unitfiles.get_Group(conf)
-        if runAsRoot:
-            runuser = "root"
-            rungroup = "root"
-        xgroups = self.unitfiles.get_SupplementaryGroups(conf)
-        envs = shutil_setuid(runuser, rungroup, xgroups)
-        badpath = self.chdir_workingdir(conf) # some dirs need setuid before
-        if badpath:
-            logg.error("(%s): bad workingdir: '%s'", shell_cmd(cmd), badpath)
-            os._exit(1)
-        env = self.extend_exec_env(env)
-        env.update(envs) # set $HOME to ~$USER
         try:
-            if EXEC_SPAWN:
-                cmd_args = [arg for arg in cmd] # satisfy mypy
-                exitcode = os.spawnvpe(os.P_WAIT, cmd[0], cmd_args, env)
-                os._exit(exitcode)
-            else: # pragma: no cover
-                os.execve(cmd[0], cmd, env)
-                os._exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
-        except (OSError, RuntimeError) as e:
+            runs = conf.get(Service, "Type", "simple").lower()
+            # logg.debug("%s process for %s => %s", runs, strE(conf.name()), strQ(conf.filename()))
+            self.dup2_journal_log(conf)
+            cmd_args: List[Union[str, bytes]] = []
+            #
+            runuser = self.unitfiles.get_User(conf)
+            rungroup = self.unitfiles.get_Group(conf)
+            if runAsRoot:
+                runuser = "root"
+                rungroup = "root"
+            xgroups = self.unitfiles.get_SupplementaryGroups(conf)
+            envs = shutil_setuid(runuser, rungroup, xgroups)
+            badpath = self.chdir_workingdir(conf) # some dirs need setuid before
+            if badpath:
+                logg.error("(%s): bad workingdir: '%s'", shell_cmd(cmd), badpath)
+                os._exit(1)
+            env = self.extend_exec_env(env)
+            env.update(envs) # set $HOME to ~$USER
+            try:
+                if EXEC_SPAWN:
+                    cmd_args = [arg for arg in cmd] # satisfy mypy
+                    exitcode = os.spawnvpe(os.P_WAIT, cmd[0], cmd_args, env)
+                    os._exit(exitcode)
+                else: # pragma: no cover
+                    os.execve(cmd[0], cmd, env)
+                    os._exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
+            except (OSError, RuntimeError) as e:
+                logg.error("(%s) >> %s", shell_cmd(cmd), e)
+                os._exit(1)
+        except BaseException as e: # pylint: disable=broad-exception-caught
+            # whatever went wrong, this is a fork child and it must not return
+            # to the caller: the frames above it belong to the manager. Under a
+            # test runner that replaces sys.stdout the dup2 below raises, and
+            # the child then went on running the test suite from inside itself.
             logg.error("(%s) >> %s", shell_cmd(cmd), e)
-            os._exit(1)
+            os._exit(1) # pylint: disable=protected-access
     def test_start_unit(self, unit: str) -> None:
         """ helper function to test the code that is normally forked off """
         conf = self.unitfiles.load_conf(unit)
@@ -6595,7 +6608,7 @@ class Systemctl:
         if prop in ("name","names","list"):
             return unit
         if prop in ("path","file","files"):
-            return conf.filename()
+            return strE(conf.filename())
         val = conf.get("Unit", prop, NIX)
         if val is NIX:
             if unit.endswith(".service"):
