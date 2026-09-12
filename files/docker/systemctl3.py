@@ -5984,7 +5984,7 @@ class Systemctl:
                 os.remove(target)
                 logg.info("Unit %s was masked and has been unmasked.", unit)
             else:
-                logg.info("Unit %s is not masked (symlink points to %s); nothing to do.")
+                logg.info("Unit %s is not masked (symlink points to %s); nothing to do.", unit, link_target)
             return True
         elif not os.path.exists(target):
             logg.debug("Symlink did not exist anymore: %s", target)
