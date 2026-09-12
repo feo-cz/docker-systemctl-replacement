@@ -23,6 +23,7 @@ import glob
 import errno
 import collections
 import shlex
+import stat
 import fnmatch
 import re
 from types import TracebackType
@@ -458,7 +459,7 @@ def get_RUN(root: bool = False) -> str:
             path = p.format(**locals())
             if os.path.isdir(path) and os.access(path, os.W_OK):
                 return path
-        os.makedirs(path) # "/tmp/run"
+        makedirs_mode(path) # "/tmp/run"
         return path
     else:
         uid = get_USER_ID(root)
@@ -466,7 +467,7 @@ def get_RUN(root: bool = False) -> str:
             path = p.format(**locals())
             if os.path.isdir(path) and os.access(path, os.W_OK):
                 return path
-        os.makedirs(path, 0o700) # "/tmp/run/user/{uid}"
+        os.makedirs(path, 0o700, exist_ok=True) # "/tmp/run/user/{uid}"
         return path
 def get_PID_DIR(root: bool = False) -> str:
     if root:
@@ -615,13 +616,34 @@ def shutil_setuid(user: Optional[str] = None, group: Optional[str] = None, xgrou
         return {"USER": user, "LOGNAME": logname, "HOME": home, "SHELL": shell}
     return {}
 
+def makedirs_mode(path: str, addmode: int = 0o055) -> None:
+    """ create a runtime directory of ours and make sure it can be entered whatever
+        the umask of our caller was - an untraversable directory hides everything we
+        put in it (a status file nobody can read, a notify socket no User= service
+        can reach) just as effectively as a bad mode on the file itself. Read bits
+        are only ever added, never taken away, and the mode is set through the
+        descriptor so that no symlink is followed and no path can be swapped in. """
+    os.makedirs(path, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if mode | addmode != mode:
+                os.fchmod(fd, mode | addmode)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        logg.debug("can not chmod %s >> %s", path, e)
+
 def shutil_truncate(filename: str) -> None:
     """ truncates the file (or creates a new empty file)"""
     filedir = os.path.dirname(filename)
     if not os.path.isdir(filedir):
         os.makedirs(filedir)
-    with open(filename, "w") as f:
-        f.write("")
+    # O_NOFOLLOW: this runs from read-only paths (is-active, show), which must
+    # never truncate whatever a symlink at this path happens to point at
+    fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    os.close(fd)
 
 # http://stackoverflow.com/questions/568271/how-to-check-if-there-exists-a-process-with-a-given-pid
 def pid_exists(pid: int) -> bool:
@@ -1073,7 +1095,7 @@ class waitlock:
         try:
             folder = self.lockfolder
             if not os.path.isdir(folder):
-                os.makedirs(folder)
+                makedirs_mode(folder)
         except OSError as e:
             logg.warning("oops >> %s", e)
     def lockfile(self) -> str:
@@ -3248,7 +3270,7 @@ class Systemctl:
         #     return False
         dirpath = os.path.dirname(os.path.abspath(status_file))
         if not os.path.isdir(dirpath):
-            os.makedirs(dirpath)
+            makedirs_mode(dirpath)
         if conf.status is None:
             conf.status = self.read_status_from(conf)
         if TRUE:
@@ -3264,7 +3286,23 @@ class Systemctl:
                 else:
                     conf.status[key] = strE(value)
         try:
-            with open(status_file, "w") as f:
+            # O_NOFOLLOW: the status file is our own state, never a symlink. Without it
+            # a symlink at this path makes us truncate and overwrite whatever it points
+            # at - os_path() keeps the status path inside --root but says nothing about
+            # where a symlink leads.
+            fd = os.open(status_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o666)
+            with os.fdopen(fd, "w") as f:
+                try:
+                    # O_CREAT applies the umask, so a fresh file would still come out
+                    # 0640 under umask 027 - and an unreadable status file makes a
+                    # running service look inactive to every non-root is-active/show.
+                    # Only ever add read bits, so a mode someone widened on purpose
+                    # (0664 on a umask 002 host) is not narrowed behind their back.
+                    mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                    if mode | 0o044 != mode:
+                        os.fchmod(f.fileno(), mode | 0o044)
+                except OSError as e:
+                    logg.debug("[status] can not chmod status file %s >> %s", status_file, e)
                 for key in sorted(conf.status):
                     value = conf.status[key]
                     if key == "MainPID" and str(value) == "0":
@@ -3898,8 +3936,9 @@ class Systemctl:
     def notify_socket_from(self, conf: SystemctlConf, socketfile: Optional[str] = None) -> NotifySocket:
         socketfile = self.get_notify_socket_from(conf, socketfile, debug=True)
         try:
-            if not os.path.isdir(os.path.dirname(socketfile)):
-                os.makedirs(os.path.dirname(socketfile))
+            socketdir = os.path.dirname(socketfile)
+            if not os.path.isdir(socketdir):
+                makedirs_mode(socketdir)
             if os.path.exists(socketfile):
                 os.unlink(socketfile)
         except OSError as e:
