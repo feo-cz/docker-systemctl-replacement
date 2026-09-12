@@ -4018,7 +4018,7 @@ class Systemctl:
                 exe, newcmd = self.unitfiles.expand_cmd(cmd, env, conf)
                 logg.info(" pre-start %s", shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid: 
+                if not forkpid:
                     self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug(" pre-start done (%s) <-%s>",
@@ -4319,7 +4319,7 @@ class Systemctl:
                 exe, newcmd = self.unitfiles.expand_cmd(cmd, env, conf)
                 logg.info("%s pre-start %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
-                if not forkpid: 
+                if not forkpid:
                     self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
                 run = subprocess_waitpid(forkpid)
                 logg.debug("%s pre-start done (%s) <-%s>", runs,
