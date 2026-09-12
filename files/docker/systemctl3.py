@@ -26,6 +26,7 @@ import shlex
 import fnmatch
 import re
 from types import TracebackType
+import pickle
 
 __copyright__: str = "(C) 2016-2026 Guido U. Draheim, licensed under the EUPL"
 __version__: str = "1.7.1311"
@@ -7078,6 +7079,58 @@ class Systemctl:
     def test_float(self) -> float:
         """ return 'Unknown result type' """
         return 0. # "Unknown result type"
+    def get_environment_file(self) -> str:
+        """ where 'systemctl set-environment' keeps what it was given. systemd holds
+            this in the manager's memory; without a manager it has to be a file. """
+        return os_path(self._root, os.path.join(_notify_socket_folder, "systemd.envs"))
+    def read_environment_file(self) -> Dict[str, str]:
+        filename = self.get_environment_file()
+        environ: Dict[str, str] = {}
+        if os.path.isfile(filename):
+            try:
+                with open(filename, "rb") as f:
+                    environ = pickle.load(f)
+            except (OSError, ValueError, pickle.UnpicklingError) as e:
+                logg.warning("bad read of environment file '%s' >> %s", filename, e)
+        return environ
+    def write_environment_file(self, name: str, value: Optional[str] = None) -> None:
+        environ = self.read_environment_file()
+        if value is None:
+            environ.pop(name, None)
+        else:
+            environ[name] = value
+        filename = self.get_environment_file()
+        dirpath = os.path.dirname(filename)
+        if not os.path.isdir(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
+        try:
+            with open(filename, "wb") as f:
+                pickle.dump(environ, f)
+        except OSError as e:
+            logg.error("can not write environment file '%s' >> %s", filename, e)
+    def get_environment_modules(self, *args: str) -> Union[str, int]:
+        """ get-environment NAME -- print what set-environment was given """
+        if not args:
+            return NOT_OK
+        return self.read_environment_file().get(args[0], NIX)
+    def set_environment_modules(self, *args: str) -> int:
+        """ set-environment NAME=VALUE """
+        if not args:
+            return NOT_OK
+        setting = args[0].split("=", 1)
+        if len(setting) != 2:
+            return NOT_ACTIVE
+        name, value = setting[0], setting[1]
+        logg.debug("set environment %s to %s", name, strQ(value))
+        self.write_environment_file(name, value)
+        return NOT_A_PROBLEM
+    def unset_environment_modules(self, *args: str) -> int:
+        """ unset-environment NAME """
+        if not args:
+            return NOT_OK
+        logg.debug("unset environment %s", args[0])
+        self.write_environment_file(args[0])
+        return NOT_A_PROBLEM
 
 def print_begin(argv: List[str], args: List[str]) -> None:
     script = os.path.realpath(argv[0])
@@ -7161,6 +7214,15 @@ def runcommand(command: str, *modules: str) -> int:
         exitcode = is_not_ok(systemctl.enable_modules(*modules))
     elif command in ["environment"]:
         print_str_dict(systemctl.environment_of_unit(*modules))
+    elif command in ["get-environment"]:
+        result = systemctl.get_environment_modules(*modules)
+        assert result is not None
+        if isinstance(result, int): exitcode = result 
+        elif isinstance(result, str): print_str(result)
+    elif command in ["set-environment"]:
+        exitcode = systemctl.set_environment_modules(*modules)
+    elif command in ["unset-environment"]:
+        exitcode = systemctl.unset_environment_modules(*modules)        
     elif command in ["get-default"]:
         print_str(systemctl.get_default_target())
     elif command in ["get-preset"]:
