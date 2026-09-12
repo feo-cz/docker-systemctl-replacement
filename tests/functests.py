@@ -780,6 +780,40 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def test_0370(self) -> None:
+        """ unmask removes the /dev/null symlink that masking put there """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        svc1 = "masked1.service"
+        os.symlink("/dev/null", F"{sysd}/{svc1}")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        self.assertEq(os.path.islink(F"{sysd}/{svc1}"), True)
+        systemctl.unmask_unit(svc1)
+        self.assertEq(os.path.exists(F"{sysd}/{svc1}"), False)
+        self.rm_testdir()
+    def test_0371(self) -> None:
+        """ unmask must not remove a symlink that is NOT a mask - a unit file may
+            well be a link to the real unit (an alias, or a packaging choice), and
+            deleting it uninstalls the service instead of unmasking it """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        real, link = "real1.service", "link1.service"
+        text_file(F"{sysd}/{real}", """
+        [Service]
+        ExecStart = /usr/bin/true""")
+        os.symlink(real, F"{sysd}/{link}")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl.unmask_unit(link)
+        self.assertEq(os.path.islink(F"{sysd}/{link}"), True)
+        self.assertEq(os.readlink(F"{sysd}/{link}"), real)
+        self.assertEq(os.path.isfile(F"{sysd}/{real}"), True)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
