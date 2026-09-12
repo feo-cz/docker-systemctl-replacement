@@ -4811,9 +4811,14 @@ class Systemctl:
     def dup2_journal_log(self, conf: SystemctlConf) -> None:
         std = self.journal.open_standard_log(conf)
         if EXEC_DUP2:
-            os.dup2(std.inp.fileno(), sys.stdin.fileno())
-            os.dup2(std.out.fileno(), sys.stdout.fileno())
-            os.dup2(std.err.fileno(), sys.stderr.fileno())
+            # the standard descriptors by number, not whatever sys.stdout happens
+            # to be bound to. It is the descriptors that the exec'd program will
+            # inherit, and an object put in sys.stdout's place by a test runner or
+            # an embedding does not have to have one at all - asking it for a
+            # fileno() then raises inside the fork child.
+            os.dup2(std.inp.fileno(), 0)
+            os.dup2(std.out.fileno(), 1)
+            os.dup2(std.err.fileno(), 2)
         # implicit: std.inp.close(), std.out.close(), std.err.close()
     def run_as_root(self, conf: SystemctlConf, exe: ExecMode) -> bool:
         """ an Exec line prefixed with '+' (or '!') runs with full privileges even
