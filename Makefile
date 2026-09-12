@@ -165,6 +165,11 @@ exectestlist = test_[1234]
 docktestlist = test_[567]
 docktestlist2 = st_[567]
 func functests: ; $(MAKE) "test_0*"
+# what the fork's unit-test workflow calls. It wants junit xml to publish,
+# and it wants tests that need neither docker nor a network. That is exactly
+# functests: in-process, a few seconds, no side effects outside tmp/.
+# The heavy suite is "make exectests" - some twenty minutes, run by hand.
+testlocal: ; $(FUNCTEST) --xmlresults=TEST-functests.xml
 exec exectests: ; $(MAKE) test_1* test_2* test_3* test_4*
 dock docktests: ; $(MAKE) test_5* test_6* test_7*
 15.6/tests:  ; $(MAKE) "15.6/$(docktestlist)"
@@ -430,9 +435,16 @@ autopep8: ; $${PKG:-zypper} install -y python3-autopep8
 %.py.lint:
 	$(PYLINT) $(PYLINT_OPTIONS) $(@:.lint=)
 
+# tests/testsuite.py went away when the suite was split into exectests,
+# functests, docktests and buildtests, but this target was never moved over,
+# so "make lint" has been failing on a file that does not exist. These four
+# are the ones that pylint passes clean; tests/functests.py and
+# tests/buildtests.py do not, and did not before this fork either.
 lint:
 	$(MAKE) files/docker/systemctl3.py.lint
-	$(MAKE) tests/testsuite.py.lint
+	$(MAKE) files/docker/journalctl3.py.lint
+	$(MAKE) tests/exectests.py.lint
+	$(MAKE) tests/docktests.py.lint
 pep8 style:
 	$(MAKE) files/docker/systemctl3.py.pep8
 	$(MAKE) types/systemctl3.pyi.pep8
