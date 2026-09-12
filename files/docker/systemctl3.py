@@ -469,6 +469,8 @@ def get_RUN(root: bool = False) -> str:
                 return path
         os.makedirs(path, 0o700, exist_ok=True) # "/tmp/run/user/{uid}"
         return path
+_system_folder_run = "/run"
+
 def get_PID_DIR(root: bool = False) -> str:
     if root:
         return get_RUN(root)
@@ -3022,6 +3024,7 @@ class Systemctl:
     init_mode: int
     journal: SystemctlJournal
     _boottime: Optional[float]
+    _system_state_kept: Optional[bool]
     _restarted_unit: Dict[str, List[float]]
     _restart_failed_units: Dict[str, float]
     _sockets: Dict[str, SystemctlSocket]
@@ -3057,6 +3060,7 @@ class Systemctl:
         self.exit_mode = EXIT_MODE or 0
         self.init_mode = INIT_MODE or 0
         self._boottime = None # cache self.get_boottime()
+        self._system_state_kept = None # cache self.system_state_kept()
         self._restarted_unit = {}
         self._restart_failed_units = {}
         self._sockets = {}
@@ -3292,6 +3296,41 @@ class Systemctl:
         status_file = self.get_StatusFile(conf)
         # this not a real setting, but do the expand_special anyway
         return os_path(self._root, self.unitfiles.expand_special(status_file, conf))
+    def read_status_file_from(self, conf: SystemctlConf) -> str:
+        """ where to READ the state of a unit from. systemd keeps the state of system
+            units in /run and lets anyone read it; only changing it needs privileges.
+            get_RUN hands an unprivileged caller its own runtime tree to write into -
+            which is right for writing, and wrong for reading, because answering from
+            that private tree is how a service running since boot gets reported as
+            stopped, or as failed from a PID that has long been recycled. Writing
+            still goes through get_status_file_from(), so nothing here lets an
+            unprivileged caller touch the system state. A unit that names its own
+            StatusFile= means that path and nothing else. """
+        path = self.get_status_file_from(conf)
+        if _user_mode or conf.get(Service, "StatusFile", ""):
+            return path
+        system = os_path(self._root, os.path.join(_system_folder_run, os.path.basename(path)))
+        if system != path and self.system_state_kept():
+            return system
+        return path
+    def system_state_kept(self) -> bool:
+        """ is a privileged manager keeping the state of system units in /run? If so,
+            that is the answer for every system unit - including the absence of a file,
+            which then means inactive rather than "look in our own tree". If not, then
+            nobody but us writes system state (an unprivileged container where this
+            script is the manager) and our own tree is all there is. """
+        if self._system_state_kept is None:
+            folder = os_path(self._root, _system_folder_run)
+            found = False
+            try:
+                for name in os.listdir(folder):
+                    if name.endswith(".status"):
+                        found = True
+                        break
+            except OSError as e:
+                logg.log(DEBUG_STATUS, "[status] can not list %s >> %s", folder, e)
+            self._system_state_kept = found
+        return self._system_state_kept
     def get_StatusFile(self, conf: SystemctlConf, default: Optional[str] = None) -> str: # -> text
         """ file where to store a status mark """
         status_file =  conf.get(Service, "StatusFile", default)
@@ -3364,7 +3403,7 @@ class Systemctl:
             return False
         return True
     def read_status_from(self, conf: SystemctlConf) -> Dict[str, str]:
-        status_file = self.get_status_file_from(conf)
+        status_file = self.read_status_file_from(conf)
         status: Dict[str, str] = {}
         # if not status_file:
         #   return status
@@ -5454,7 +5493,7 @@ class Systemctl:
             unit was never started here, and "inactive" is a complete answer rather
             than a gap - the same one a privileged caller gets. "unknown" is kept
             for the case where our own state is the thing we cannot read. """
-        return bool(self.getsize(self.get_status_file_from(conf)))
+        return bool(self.getsize(self.read_status_file_from(conf)))
     def get_active_service_from(self, conf: Optional[SystemctlConf]) -> str:
         """ returns 'active' 'inactive' 'failed' 'unknown' """
         # used in try-restart/other commands to check if needed.
@@ -5473,7 +5512,7 @@ class Systemctl:
                 if not self.have_status_of(conf):
                     return "inactive" # unreadable, and never started here - also complete
                 conf.state_unreadable = False # our own state answers below
-        status_file = self.get_status_file_from(conf)
+        status_file = self.read_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
             if state:
@@ -5534,7 +5573,7 @@ class Systemctl:
                 if not self.have_status_of(conf):
                     return "dead" # unreadable, and never started here - also complete
                 conf.state_unreadable = False # our own state answers below
-        status_file = self.get_status_file_from(conf)
+        status_file = self.read_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
             if state:
