@@ -6,6 +6,7 @@ import os
 import sys
 
 def argument_parser() -> argparse.ArgumentParser:
+    """ the options of journalctl that we answer, plus the ones we accept and ignore """
     parser = argparse.ArgumentParser()
     parser.add_argument('-u', '--unit', metavar='unit', type=str, required=True, help='Systemd unit to display')
     parser.add_argument('-f', '--follow', default=False, action='store_true', help='Follows the log')
@@ -34,6 +35,7 @@ def systemctl_command(args: argparse.Namespace, path: str = "") -> list:
     return cmd
 
 def main() -> None:
+    """ journalctl is a thin front for 'systemctl log', so hand the work over """
     args = argument_parser().parse_args()
     cmd = systemctl_command(args, os.path.dirname(sys.argv[0]))
     os.execvp(cmd[0], cmd)
