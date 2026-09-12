@@ -780,6 +780,49 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def _list_unit_files_setup(self, tmp: str) -> "app.Systemctl":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        for name in ["zza.service", "zzb.service", "other.service"]:
+            text_file(F"{sysd}/{name}", """
+            [Service]
+            ExecStart = /usr/bin/true""")
+        os.symlink("/dev/null", F"{sysd}/zzmasked.service")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl._no_legend = True # pylint: disable=protected-access
+        return systemctl
+    def test_0380(self) -> None:
+        """ list-unit-files PATTERN filters the listing """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        names = [item[0] for item in systemctl.list_unit_files_modules("zz*")]
+        self.assertEq(sorted(names), ["zza.service", "zzb.service", "zzmasked.service"])
+        self.rm_testdir()
+    def test_0381(self) -> None:
+        """ every PATTERN counts, not just the first one """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        names = [item[0] for item in systemctl.list_unit_files_modules("zza*", "other*")]
+        self.assertEq(sorted(names), ["other.service", "zza.service"])
+        self.rm_testdir()
+    def test_0382(self) -> None:
+        """ --state=masked selects by the enablement state that is listed """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        systemctl._only_state = ["masked"] # pylint: disable=protected-access
+        names = [item[0] for item in systemctl.list_unit_files_modules()]
+        self.assertEq(names, ["zzmasked.service"])
+        self.rm_testdir()
+    def test_0383(self) -> None:
+        """ a PATTERN and --state= narrow together """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        systemctl._only_state = ["masked"] # pylint: disable=protected-access
+        self.assertEq([item[0] for item in systemctl.list_unit_files_modules("zza*")], [])
+        self.assertEq([item[0] for item in systemctl.list_unit_files_modules("zzm*")], ["zzmasked.service"])
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

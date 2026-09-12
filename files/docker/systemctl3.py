@@ -3074,20 +3074,13 @@ class Systemctl:
         else:
             result = self.list_target_unit_files()
             result += self.list_service_unit_files(*modules)
-            
-        filterString = modules[0] if len(modules) >= 1 else None
-        if filterString:
-            result = [
-                service for service in result
-                if fnmatch.fnmatch(service[0], filterString)
-            ]
-        if len(self._only_state) > 0:
-            result = [
-                service for service in result
-                if service[1] in self._only_state
-            ]
-        
-
+        if modules:
+            # the PATTERN arguments apply to the targets as well, which
+            # list_target_unit_files does not know about
+            result = [item for item in result
+                      if any(fnmatch.fnmatch(item[0], module) for module in modules)]
+        if self._only_state:
+            result = [item for item in result if item[1] in self._only_state]
         if self._no_legend:
             return result
         found = "%s unit files listed." % len(result)
