@@ -976,6 +976,7 @@ class SystemctlConf:
     data: SystemctlConfData
     env: Dict[str, str]
     status: Optional[Dict[str, str]]
+    state_unreadable: bool
     masked: Optional[str]
     module: Optional[str]
     nonloaded_path: str
@@ -986,6 +987,7 @@ class SystemctlConf:
         self.data = data # UnitConfParser
         self.env = {}
         self.status = None
+        self.state_unreadable = False # we failed to read the status or pid file
         self.masked = None
         self.module = module
         self.nonloaded_path = ""
@@ -3102,13 +3104,50 @@ class Systemctl:
         return [("UNIT FILE", "STATE")] + result + [("", ""), (found, "")]
     ##
     ##
-    def read_pid_file(self, pid_file: str, default: Optional[int] = None) -> Optional[int]:
+    def is_readable_file(self, filename: str, conf: Optional[SystemctlConf] = None, ours: bool = True) -> bool:
+        """ os.path.isfile() answers False for a file we may not stat() - an
+            unreadable directory then looks exactly like an absent file, which is
+            how a running service gets reported as stopped. Ask by opening.
+            ours=False for a PIDFile=, which some application wrote and may well
+            have placed behind a symlink of its own. """
+        try:
+            mode = os.lstat(filename).st_mode if ours else os.stat(filename).st_mode
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ENOTDIR):
+                return False # absent is a real answer
+            logg.warning("can not stat %s >> %s", filename, e)
+            if conf is not None:
+                conf.state_unreadable = True
+            return False
+        if not stat.S_ISREG(mode) and not (not ours and stat.S_ISLNK(mode)):
+            # never open() a fifo (it blocks forever without a writer, which would
+            # hang is-active and, on PID 1, survive the SIGTERM of a docker stop),
+            # nor a device or a directory. A symlink is refused too: this is our own
+            # state file, and following one reads somebody else's content - which
+            # ends up quoted in the journal and mistaken for a state
+            logg.warning("not a regular file: %s", filename)
+            if conf is not None:
+                conf.state_unreadable = True
+            return False
+        try:
+            os.close(os.open(filename, os.O_RDONLY | os.O_NONBLOCK))
+            return True
+        except OSError as e:
+            if e.errno in (errno.ENOENT, errno.ENOTDIR):
+                return False
+            logg.warning("can not read %s >> %s", filename, e)
+            if conf is not None:
+                conf.state_unreadable = True
+            return False
+    def read_pid_file(self, pid_file: str, default: Optional[int] = None, conf: Optional[SystemctlConf] = None) -> Optional[int]:
         pid = default
         if not pid_file:
             return default
-        if not os.path.isfile(pid_file):
+        if conf is not None:
+            conf.state_unreadable = False
+        if not self.is_readable_file(pid_file, conf, ours=False):
             return default
-        if self.truncate_old(pid_file):
+        if self.truncate_old(pid_file, conf):
             return default
         try:
             # some pid-files from applications contain multiple lines
@@ -3119,6 +3158,8 @@ class Systemctl:
                         break
         except (OSError, ValueError) as e:
             logg.warning("bad read of pid file '%s' >> %s", pid_file, e)
+            if conf is not None:
+                conf.state_unreadable = True
         return pid
     def wait_pid_file(self, pid_file: str, timeout: Optional[int] = None) -> Optional[int]: # -> pid?
         """ wait some seconds for the pid file to appear and return the pid """
@@ -3154,7 +3195,7 @@ class Systemctl:
             or it is the value in the status file written by this systemctl.py code """
         pid_file = self.pid_file_from(conf)
         if pid_file:
-            return self.read_pid_file(pid_file, default)
+            return self.read_pid_file(pid_file, default, conf)
         status = self.read_status_from(conf)
         if "MainPID" in status:
             return to_intN(status["MainPID"], default)
@@ -3237,18 +3278,24 @@ class Systemctl:
                     content = F"{key}={str(value)}\n"
                     logg.debug("[status] writing to %s\n\t%s", status_file, content.strip())
                     f.write(content)
-        except IOError as e:
+        except OSError as e:
+            # we could not record the state, so we no longer know it either - saying
+            # "written" here is what turns a failed start into a confident "inactive"
+            # and leaves the process running with nothing naming its PID
             logg.error("[status] writing STATUS %s >> %s\n\t to status file %s", status, e, status_file)
+            conf.state_unreadable = True
+            return False
         return True
     def read_status_from(self, conf: SystemctlConf) -> Dict[str, str]:
         status_file = self.get_status_file_from(conf)
         status: Dict[str, str] = {}
         # if not status_file:
         #   return status
-        if not os.path.isfile(status_file):
+        conf.state_unreadable = False
+        if not self.is_readable_file(status_file, conf):
             logg.log(DEBUG_STATUS, "[status] no status file: %s\n returning %s", status_file, status)
-            return status
-        if self.truncate_old(status_file):
+            return status # absent is a real answer, unreadable was flagged above
+        if self.truncate_old(status_file, conf):
             logg.log(DEBUG_STATUS, "[status] old status file: %s\n returning %s", status_file, status)
             return status
         try:
@@ -3264,7 +3311,11 @@ class Systemctl:
                         else:  # pragma: no cover
                             logg.warning("[status] ignored %s", line.strip())
         except (OSError, ValueError) as e:
+            # an empty dict from here is indistinguishable from "service not running",
+            # so remember that we never got to look - the callers must not report a
+            # state they could not determine
             logg.warning("[status] bad read of status file '%s' >> %s", status_file, e)
+            conf.state_unreadable = True
         return status
     def get_status_from(self, conf: SystemctlConf, name: str, default: Optional[str] = None) -> Optional[str]:
         if conf.status is None:
@@ -3367,7 +3418,7 @@ class Systemctl:
 
     def get_filetime(self, filename: str) -> float:
         return os.path.getmtime(filename)
-    def truncate_old(self, filename: str) -> bool:
+    def truncate_old(self, filename: str, conf: Optional[SystemctlConf] = None) -> bool:
         filetime = self.get_filetime(filename)
         boottime = self.get_boottime()
         if filetime >= boottime:
@@ -3379,8 +3430,13 @@ class Systemctl:
             logg.log(DEBUG_BOOTTIME, "  boot time: %s (%s)", datetime.datetime.fromtimestamp(boottime), "status TRUNCATED NOW")
             shutil_truncate(filename)
         except OSError as e:
+            # the file still holds pre-boot content, which truncate_old exists to
+            # distrust - so keep saying "stale, treat as empty" and let the flag
+            # turn that into "unknown" rather than believing a dead PID
             logg.warning("while truncating >> %s", e)
-        return True # truncated
+            if conf is not None:
+                conf.state_unreadable = True
+        return True # truncated (or too stale to be believed)
     def getsize(self, filename: str) -> int:
         if filename is None: # pragma: no cover (is never null)
             return 0
@@ -5312,8 +5368,9 @@ class Systemctl:
             return "unknown"
         pid_file = self.pid_file_from(conf)
         if pid_file: # application PIDFile
-            if not os.path.exists(pid_file):
-                return "inactive"
+            conf.state_unreadable = False
+            if not self.is_readable_file(pid_file, conf, ours=False):
+                return "unknown" if conf.state_unreadable else "inactive"
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
@@ -5326,6 +5383,8 @@ class Systemctl:
             if not pid_exists(pid) or pid_zombie(pid):
                 return "failed"
             return "active"
+        elif conf.state_unreadable:
+            return "unknown"
         else:
             return "inactive"
     def get_active_target_from(self, conf: SystemctlConf) -> str:
@@ -5362,8 +5421,9 @@ class Systemctl:
             return None
         pid_file = self.pid_file_from(conf)
         if pid_file:
-            if not os.path.exists(pid_file):
-                return "dead"
+            conf.state_unreadable = False
+            if not self.is_readable_file(pid_file, conf, ours=False):
+                return "unknown" if conf.state_unreadable else "dead"
         status_file = self.get_status_file_from(conf)
         if self.getsize(status_file):
             state = self.get_status_from(conf, "ActiveState", "")
@@ -5378,6 +5438,8 @@ class Systemctl:
             if not pid_exists(pid) or pid_zombie(pid):
                 return "failed"
             return "running"
+        elif conf.state_unreadable:
+            return "unknown"
         else:
             return "dead"
     def is_failed_modules(self, *modules: str) -> List[str]:

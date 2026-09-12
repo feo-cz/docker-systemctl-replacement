@@ -856,6 +856,66 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(mode & 0o055, 0o055, F"mode is {mode:04o}")
         app.makedirs_mode(folder) # again on an existing directory must not raise
         self.rm_testdir()
+    def test_0430(self) -> None:
+        """ a status file we cannot read must not be reported as "not running" -
+            that is the opposite answer, not a missing one """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid(), AS="active")
+        self.assertEq(systemctl.get_active_from(conf), "active")
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        conf.status = None # forget what we cached from the readable file
+        self.assertEq(systemctl.get_active_from(conf), "unknown")
+        self.assertEq(systemctl.get_substate_from(conf), "unknown")
+        os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0431(self) -> None:
+        """ an absent status file is a real answer, not a failure """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        self.assertEq(systemctl.get_active_from(conf), "inactive")
+        self.assertEq(conf.state_unreadable, False)
+        self.rm_testdir()
+    def test_0432(self) -> None:
+        """ a fifo at the status path must not block us - open() on one waits for a
+            writer forever, which would hang is-active and, on PID 1, survive the
+            SIGTERM of a docker stop """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        status_file = systemctl.get_status_file_from(conf)
+        os.makedirs(os.path.dirname(status_file), exist_ok=True)
+        os.mkfifo(status_file)
+        self.assertEq(systemctl.get_active_from(conf), "unknown")
+        self.rm_testdir()
+    def test_0433(self) -> None:
+        """ is_readable_file tells "cannot read" apart from "is not there" """
+        tmp = self.testdir()
+        systemctl, _ = self._status_conf(tmp)
+        missing = F"{tmp}/nosuch.txt"
+        self.assertEq(systemctl.is_readable_file(missing), False)
+        present = F"{tmp}/present.txt"
+        text_file(present, "x\n")
+        self.assertEq(systemctl.is_readable_file(present), True)
+        os.chmod(present, 0o000)
+        conf = app.SystemctlConf(app.UnitConfParser(), "zz9.service")
+        self.assertEq(systemctl.is_readable_file(present, conf), False)
+        self.assertEq(conf.state_unreadable, True)
+        os.chmod(present, 0o644)
+        self.rm_testdir()
+    def test_0434(self) -> None:
+        """ a PIDFile is written by the application and may well be a symlink of its
+            own - unlike our status file, that one has to be followed """
+        tmp = self.testdir()
+        systemctl, _ = self._status_conf(tmp)
+        real = F"{tmp}/real.pid"
+        text_file(real, "4242\n")
+        link = F"{tmp}/link.pid"
+        os.symlink(os.path.abspath(real), link)
+        self.assertEq(systemctl.is_readable_file(link, None, ours=False), True)
+        self.assertEq(systemctl.read_pid_file(link), 4242)
+        self.assertEq(systemctl.is_readable_file(link, None, ours=True), False)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
