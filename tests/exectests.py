@@ -20917,6 +20917,55 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_4170_systemctl_stop_honours_its_timeout(self) -> None:
+        """ systemd.service(5) on TimeoutStopSec: "it configures the time to wait
+            for each ExecStop= command. If any of them times out, subsequent
+            ExecStop= commands are skipped and the service will be terminated by
+            SIGTERM". We waited for the control process with a plain waitpid, so
+            an ExecStop that hangs held the whole stop for as long as it liked. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("sleep")
+        bindir = os_path(root, "/usr/bin")
+        text_file(os_path(testdir, "zzt.service"), """
+            [Unit]
+            Description=Testing T
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testsleep} 300
+            ExecStop=/bin/sleep 30
+            TimeoutStopSec=2
+            """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzt.service"), os_path(root, "/etc/systemd/system/zzt.service"))
+        #
+        cmd = "{systemctl} start zzt.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        top = _recent(output(_top_list))
+        self.assertTrue(greps(top, testsleep))
+        #
+        started = time.monotonic()
+        cmd = "{systemctl} stop zzt.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        lapse = time.monotonic() - started
+        logg.info(" %s =>%s (%.1fs)\n%s", cmd, end, lapse, out)
+        #
+        self.assertLess(lapse, 15) # the ExecStop sleeps for thirty
+        time.sleep(1)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertFalse(greps(top, testsleep)) # and the service is gone with it
+        #
+        kill_testsleep = "{systemctl} __killall {testsleep}"
+        sx____(kill_testsleep.format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def test_4201_systemctl_py_dependencies_plain_start_order(self) -> None:
         """ check list-dependencies - standard order of starting
             units is simply the command line order"""
