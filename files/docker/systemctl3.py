@@ -7390,6 +7390,18 @@ class Systemctl:
         self.write_environment_file(args[0])
         return NOT_A_PROBLEM
 
+SystemctlProgCommands = ["halt", "poweroff", "reboot", "shutdown", "telinit", "runlevel"]
+
+def command_of_prog(prog: str) -> str:
+    """ /sbin/halt, /sbin/poweroff, /sbin/reboot, /sbin/shutdown, /sbin/telinit and
+        /sbin/runlevel are symlinks to systemctl. systemd dispatches on the name it
+        was invoked as (program_invocation_short_name in systemctl.c), so being run
+        as 'reboot' means the reboot command and not a listing of units. """
+    name = os.path.basename(prog)
+    if name in SystemctlProgCommands:
+        return name
+    return ""
+
 def print_begin(argv: List[str], args: List[str]) -> None:
     script = os.path.realpath(argv[0])
     system = _user_mode and " --user" or " --system"
@@ -7786,11 +7798,15 @@ def main() -> int:
     #
     if opt.version:
         args = ["version"]
-    if not args:
-        if INIT_MODE:
-            args = ["default"]
-        else:
-            args = ["list-units"]
+    else:
+        prog_command = command_of_prog(sys.argv[0])
+        if prog_command:
+            args = [prog_command] + args
+        elif not args:
+            if INIT_MODE:
+                args = ["default"]
+            else:
+                args = ["list-units"]
     print_begin2(args)
     command = args[0]
     modules = args[1:]

@@ -1701,6 +1701,20 @@ class AppUnitTest(unittest.TestCase):
         systemctl._now = 0 # pylint: disable=protected-access
         self.assertTrue(systemctl.enable_units(["zzn.service"]))
         self.rm_testdir()
+    def test_0480(self) -> None:
+        """ /sbin/halt and friends are symlinks to systemctl, and systemd dispatches
+            on the name it was invoked as. Without that, running as 'reboot' printed
+            a unit listing and returned success. """
+        for name in ["halt", "poweroff", "reboot", "shutdown", "telinit", "runlevel"]:
+            self.assertEqual(app.command_of_prog(F"/sbin/{name}"), name)
+            self.assertEqual(app.command_of_prog(name), name)
+        self.rm_testdir()
+    def test_0481(self) -> None:
+        """ ... and the names we are normally installed under mean no such command """
+        for name in ["/usr/bin/systemctl", "/bin/systemctl.docker", "systemctl",
+                     "files/docker/systemctl3.py", "/sbin/init", "/sbin/rebooted"]:
+            self.assertEqual(app.command_of_prog(name), "")
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
