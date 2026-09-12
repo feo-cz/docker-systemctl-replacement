@@ -1653,6 +1653,54 @@ class AppUnitTest(unittest.TestCase):
             systemctl.restart_failed_units(["zzr.service"])
         self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
         self.rm_testdir()
+    def _enable_now(self, tmp, execstart):
+        """ a unit that gets enabled and started in one go (systemctl enable --now) """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzn.service", F"""
+        [Service]
+        Type = oneshot
+        ExecStart = {execstart}
+        [Install]
+        WantedBy = multi-user.target""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl._now = 1 # pylint: disable=protected-access
+        return systemctl
+    def test_0470(self) -> None:
+        """ enable --now reports a start that failed. The start is half of what
+            --now promises, so swallowing its result makes the command claim it
+            did something it did not do. """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/false")
+        self.assertFalse(systemctl.enable_units(["zzn.service"]))
+        wants = F"{tmp}/etc/systemd/system/multi-user.target.wants/zzn.service"
+        # islink, not exists - with a relative --root the wants-link is written
+        # with a relative target and does not resolve. That is a different bug.
+        self.assertTrue(os.path.islink(wants)) # the enable half did happen
+        self.rm_testdir()
+    def test_0471(self) -> None:
+        """ ... and a start that worked is still a success """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/true")
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        self.rm_testdir()
+    def test_0472(self) -> None:
+        """ disable --now reports a stop that failed the same way """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/true")
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        systemctl.stop_unit = lambda unit: False # type: ignore[method-assign]
+        self.assertFalse(systemctl.disable_units(["zzn.service"]))
+        self.rm_testdir()
+    def test_0473(self) -> None:
+        """ without --now the start is not attempted at all and cannot fail """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/false")
+        systemctl._now = 0 # pylint: disable=protected-access
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

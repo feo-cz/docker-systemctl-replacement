@@ -5897,7 +5897,8 @@ class Systemctl:
             if not self.enable_unit(unit):
                 done = False
             elif self._now:
-                self.start_unit(unit)
+                if not self.start_unit(unit):
+                    done = False
         return done
     def enable_unit(self, unit: str) -> bool:
         conf = self.unitfiles.load_conf(unit)
@@ -6003,7 +6004,8 @@ class Systemctl:
             if not self.disable_unit(unit):
                 done = False
             elif self._now:
-                self.stop_unit(unit)
+                if not self.stop_unit(unit):
+                    done = False
         return done
     def disable_unit(self, unit: str) -> bool:
         conf = self.unitfiles.load_conf(unit)
