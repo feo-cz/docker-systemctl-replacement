@@ -4951,7 +4951,7 @@ class Systemctl:
                     # a timeout skips the remaining ExecStop commands even when the
                     # command was prefixed with '-' - it is the unit that ran out of
                     # time, not the command that reported a failure
-                    returncode = run.returncode
+                    returncode = run.returncode or NOT_OK
                     service_result = "failed"
                     break
             if timedout:
@@ -4989,7 +4989,7 @@ class Systemctl:
                 run = must_have_failed(run, newcmd) # TODO: a workaround
                 # self.write_status_from(conf, MainPID=run.pid) # no ExecStop
                 if timedout or (run.returncode and exe.check):
-                    returncode = run.returncode
+                    returncode = run.returncode or NOT_OK
                     service_result = "failed"
                     break
             if timedout:
@@ -5029,7 +5029,7 @@ class Systemctl:
                     # a timeout skips the remaining ExecStop commands even when the
                     # command was prefixed with '-' - it is the unit that ran out of
                     # time, not the command that reported a failure
-                    returncode = run.returncode
+                    returncode = run.returncode or NOT_OK
                     service_result = "failed"
                     break
             if timedout:
