@@ -780,6 +780,57 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def _dirmode_unit(self, tmp, extra = ""):
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzd.service", F"""
+        [Service]
+        ExecStart = /usr/bin/true
+        RuntimeDirectory = foo/run
+        StateDirectory = foo/state
+        CacheDirectory = foo/cache
+        LogsDirectory = foo/logs
+        ConfigurationDirectory = foo/config
+        {extra}""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzd.service")
+    def _made_dirs(self, systemctl, conf, tmp, umask):
+        was = os.umask(umask)
+        try:
+            envs = systemctl.create_service_directories(conf)
+        finally:
+            os.umask(was)
+        return {name: os.stat(app.os_path(tmp, path)).st_mode & 0o777
+                for name, path in envs.items() if name.endswith("_DIRECTORY")}
+    def test_0510(self) -> None:
+        """ systemd.exec(5) says the directory modes "default to 0755". Ours were
+            created with whatever the caller's umask happened to allow - which is
+            0755 under the common umask 022 and is not under any other. A container
+            running with umask 007 got 0770 for every one of them. """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp)
+        modes = self._made_dirs(systemctl, conf, tmp, 0o007)
+        for name in sorted(modes):
+            self.assertEqual(oct(modes[name]), oct(0o755), name)
+        self.rm_testdir()
+    def test_0511(self) -> None:
+        """ ... and the same under a umask that would have hidden the bug """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp)
+        modes = self._made_dirs(systemctl, conf, tmp, 0o022)
+        for name in sorted(modes):
+            self.assertEqual(oct(modes[name]), oct(0o755), name)
+        self.rm_testdir()
+    def test_0512(self) -> None:
+        """ ... while a mode the unit does ask for is still the one it gets """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp, "StateDirectoryMode = 0700")
+        modes = self._made_dirs(systemctl, conf, tmp, 0o007)
+        self.assertEqual(oct(modes["STATE_DIRECTORY"]), oct(0o700))
+        self.assertEqual(oct(modes["CACHE_DIRECTORY"]), oct(0o755))
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

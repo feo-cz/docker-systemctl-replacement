@@ -187,6 +187,10 @@ SystemCompatibilityVersion: int = 219
 SysInitTarget: str = "sysinit.target"
 SysInitWait: int = 5 # max for target
 MinimumYield: float = 0.5
+# systemd.exec(5) on RuntimeDirectoryMode= and its four siblings: "Defaults to 0755".
+# Without it the mode falls out of the caller's umask, which is 0755 under the
+# common umask 022 and something else under any other.
+DefaultDirectoryMode = "0755"
 MinimumTimeoutStartSec: int = 4
 MinimumTimeoutStopSec: int = 4
 DefaultTimeoutStartSec: int = 90   # official value
@@ -1809,15 +1813,15 @@ class SystemctlUnitFiles:
     def get_ConfigurationDirectory(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
         return self.expand_special(conf.get(section, "ConfigurationDirectory", default or ""), conf)
     def get_RuntimeDirectoryMode(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
-        return conf.get(section, "RuntimeDirectoryMode", default or "")
+        return conf.get(section, "RuntimeDirectoryMode", default or DefaultDirectoryMode)
     def get_StateDirectoryMode(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
-        return conf.get(section, "StateDirectoryMode", default or "")
+        return conf.get(section, "StateDirectoryMode", default or DefaultDirectoryMode)
     def get_CacheDirectoryMode(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
-        return conf.get(section, "CacheDirectoryMode", default or "")
+        return conf.get(section, "CacheDirectoryMode", default or DefaultDirectoryMode)
     def get_LogsDirectoryMode(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
-        return conf.get(section, "LogsDirectoryMode", default or "")
+        return conf.get(section, "LogsDirectoryMode", default or DefaultDirectoryMode)
     def get_ConfigurationDirectoryMode(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
-        return conf.get(section, "ConfigurationDirectoryMode", default or "")
+        return conf.get(section, "ConfigurationDirectoryMode", default or DefaultDirectoryMode)
     def get_WorkingDirectory(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
         return conf.get(section, "WorkingDirectory", default or "")
     def get_TimeoutStopSec(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> float:
