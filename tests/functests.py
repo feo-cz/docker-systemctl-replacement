@@ -2233,7 +2233,7 @@ if __name__ == "__main__":
     if opt.xmlresults:
         if os.path.exists(opt.xmlresults):
             os.remove(opt.xmlresults)
-        xmlresults = open(opt.xmlresults, "w")
+        xmlresults = open(opt.xmlresults, "wb")
         logg.info("xml results into %s", opt.xmlresults)
     if not logfile:
         if xmlresults:
