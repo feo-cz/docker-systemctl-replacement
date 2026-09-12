@@ -1086,6 +1086,80 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(conf_b.status, None)
         self.assertEq(conf_a.status, {"ActiveState": "active"})
         self.rm_testdir()
+    def _alias_setup(self, tmp: str) -> "app.SystemctlUnitFiles":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/real1.service", """
+        [Unit]
+        Description = the real one
+        [Service]
+        ExecStart = /usr/bin/true""")
+        text_file(F"{sysd}/tmpl@.service", """
+        [Unit]
+        Description = template for %i
+        [Service]
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit
+    def test_0410(self) -> None:
+        """ a unit file that is a symlink to another unit is an alias of it - asking
+            for either name answers about the one that is really there """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        os.symlink("real1.service", F"{tmp}/etc/systemd/system/alias1.service")
+        self.assertEq(unit.real_unit_name("alias1.service"), "real1.service")
+        conf = unit.load_conf("alias1.service")
+        self.assertEq(conf.name(), "real1.service")
+        self.assertEq(unit.get_Description(conf), "the real one")
+        self.rm_testdir()
+    def test_0411(self) -> None:
+        """ a name that is not a link is not an alias """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        self.assertEq(unit.real_unit_name("real1.service"), "real1.service")
+        self.rm_testdir()
+    def test_0412(self) -> None:
+        """ tmpl@one.service -> tmpl@.service is how an instance is enabled, not an
+            alias of the template - resolving it that way would hand every instance
+            the template's conf and its name """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        sysd = F"{tmp}/etc/systemd/system"
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@one.service")
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@two.service")
+        self.assertEq(unit.real_unit_name("tmpl@one.service"), "tmpl@one.service")
+        conf1 = unit.load_conf("tmpl@one.service")
+        conf2 = unit.load_conf("tmpl@two.service")
+        self.assertEq(conf1.name(), "tmpl@one.service")
+        self.assertEq(conf2.name(), "tmpl@two.service")
+        self.assertEq(unit.get_Description(conf1), "template for one")
+        self.assertEq(unit.get_Description(conf2), "template for two")
+        self.rm_testdir()
+    def test_0413(self) -> None:
+        """ a link onto a DIFFERENT template is a real alias, and systemd carries the
+            instance across it - other@one.service means tmpl@one.service """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        os.symlink("tmpl@.service", F"{tmp}/etc/systemd/system/other@one.service")
+        self.assertEq(unit.real_unit_name("other@one.service"), "tmpl@one.service")
+        conf = unit.load_conf("other@one.service")
+        self.assertEq(unit.get_Description(conf), "template for one")
+        self.rm_testdir()
+    def test_0414(self) -> None:
+        """ an instance link is read from the template it points at, so the drop-ins
+            of the template apply to the instance as well """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(F"{sysd}/tmpl@.service.d")
+        text_file(F"{sysd}/tmpl@.service.d/10-extra.conf", """
+        [Service]
+        Environment = FROMDROPIN=yes""")
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@one.service")
+        conf = unit.load_conf("tmpl@one.service")
+        self.assertEq(conf.getlist("Service", "Environment", []), ["FROMDROPIN=yes"])
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"

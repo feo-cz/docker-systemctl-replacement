@@ -1379,6 +1379,7 @@ class SystemctlUnitFiles:
     _loaded_instance_conf: Dict[str, SystemctlConf]
     _file_for_sysv: Dict[str, str]
     _file_for_unit: Dict[str, str]
+    _alias_for_unit: Dict[str, str]
     _preset_file_list: Optional[Dict[str, PresetFile]]
     def __init__(self, root: str = NIX) -> None:
         self._root = root or _root
@@ -1396,6 +1397,7 @@ class SystemctlUnitFiles:
         self._loaded_instance_conf = {} # name@instance.service => config data of that instance
         self._file_for_sysv = {} # name.service => /etc/init.d/name
         self._file_for_unit = {} # name.service => /etc/systemd/system/name.service
+        self._alias_for_unit = {} # aliased.service => real.service (symlinked unit files)
         self._preset_file_list = None # /etc/systemd/system-preset/* => file content
     def os_path(self, path: str) -> str:
         return os_path(self._root, path)
@@ -1508,15 +1510,45 @@ class SystemctlUnitFiles:
         service_name = name
         if service_name not in self._file_for_unit:
             self._file_for_unit[service_name] = path
+        if os.path.islink(path):
+            link_target = os.readlink(path)
+            if link_target.endswith(".service"):
+                target_name = os.path.basename(link_target)
+                unit = parse_unit(service_name)
+                target = parse_unit(target_name)
+                if unit.instance and target.instance == "" and "@" in target_name:
+                    if target.prefix == unit.prefix:
+                        # foo@one.service -> foo@.service is how an instance is
+                        # enabled, not an alias. Resolving it to the template would
+                        # hand every instance the template's conf again, which is
+                        # the sharing that cost each instance but the last its state.
+                        logg.debug("instance link %s => %s", service_name, target_name)
+                    else:
+                        # an alias onto another template carries the instance along,
+                        # as systemd does - not onto the bare template, which would
+                        # be the same sharing with an empty %i
+                        aliased = "%s@%s.%s" % (target.prefix, unit.instance, unit.suffix)
+                        self._alias_for_unit[service_name] = aliased
+                        logg.debug("instance alias %s => %s", service_name, aliased)
+                else:
+                    self._alias_for_unit[service_name] = target_name
+                    logg.debug("alias found %s => %s", service_name, target_name)
         return len(self._file_for_unit)
     def add_sysv_file(self, name: str, path: str) -> int:
         service_name = name + ".service" # simulate systemd
         if service_name not in self._file_for_sysv:
             self._file_for_sysv[service_name] = path
         return len(self._file_for_sysv)
+    def real_unit_name(self, module: Optional[str] = None) -> Optional[str]:
+        """ resolve an aliased unit name (symlinked unit file) to the real one """
+        if module is None:
+            return None
+        self.scan_unit_files()
+        return self._alias_for_unit.get(module, module)
     def get_unit_file(self, module: Optional[str] = None) -> Optional[str]: # -> filename?
         """ file path for the given module (systemd) """
         self.scan_unit_files()
+        module = self.real_unit_name(module)
         if module and module in self._file_for_unit:
             return self._file_for_unit[module]
         if module and unit_of(module) in self._file_for_unit:
@@ -1595,6 +1627,10 @@ class SystemctlUnitFiles:
     def load_unit_template_conf(self, module: Optional[str]) -> Optional[SystemctlConf]: # -> conf?
         """ read the unit template with a UnitConfParser (systemd) """
         if module and "@" in module:
+            # an instance alias (foo@a.service -> bar@.service) was mapped to
+            # bar@a.service, which is a name no file carries - resolve it here so
+            # the template of the alias target is what gets loaded
+            module = self.real_unit_name(module) or module
             if module in self._loaded_instance_conf:
                 return self._loaded_instance_conf[module]
             unit = parse_unit(module)
@@ -1615,11 +1651,24 @@ class SystemctlUnitFiles:
             self._loaded_instance_conf[module] = conf
             return conf
         return None
+    def is_instance_link(self, module: Optional[str], path: str) -> bool:
+        """ foo@one.service -> foo@.service must be read as the template it points
+            at: the drop-ins live next to the template, masking is a /dev/null link
+            of the template, and an absolute link target does not resolve under
+            --root. Only the name stays the instance. """
+        if not module or "@" not in module or not os.path.islink(path):
+            return False
+        unit = parse_unit(module)
+        if not unit.instance:
+            return False
+        return os.path.basename(os.readlink(path)) == "%s@.%s" % (unit.prefix, unit.suffix)
     def load_unit_conf(self, module: Optional[str]) -> Optional[SystemctlConf]: # -> conf?
         """ read the unit file with a UnitConfParser (systemd) """
         path = self.get_unit_file(module)
         if not path:
             return None
+        if self.is_instance_link(module, path):
+            return None # load_conf falls through to load_unit_template_conf
         if path in self._loaded_unit_conf:
             return self._loaded_unit_conf[path]
         masked = None
@@ -1634,7 +1683,7 @@ class SystemctlUnitFiles:
             for name in sorted(drop_in_files):
                 path = drop_in_files[name]
                 data.read_unit_file(path)
-        conf = SystemctlConf(data, module)
+        conf = SystemctlConf(data, self.real_unit_name(module))
         conf.masked = masked
         conf.nonloaded_path = path # if masked
         conf.drop_in_files = drop_in_files
