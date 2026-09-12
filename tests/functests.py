@@ -1618,6 +1618,41 @@ class AppUnitTest(unittest.TestCase):
             self._real_pids(saved)
         self.assertEqual(killed, [(11, signal.SIGTERM), (11, signal.SIGHUP)])
         self.rm_testdir()
+    def test_0460(self) -> None:
+        """ having no unit waiting for a restart is the healthy state of the init
+            loop, not an error. restart_failed_units() runs on every tick, so the
+            flag it raised here made the manager exit 1 after a clean shutdown. """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzr.service", """
+        [Service]
+        ExecStart = /usr/bin/true
+        Restart = no""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        done = systemctl.restart_failed_units(["zzr.service"])
+        self.assertEqual(done, [])
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        self.rm_testdir()
+    def test_0461(self) -> None:
+        """ ... and it stays that way over the repeated ticks of the init loop """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzr.service", """
+        [Service]
+        ExecStart = /usr/bin/true
+        Restart = no""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        for _ in range(3):
+            systemctl.restart_failed_units(["zzr.service"])
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
