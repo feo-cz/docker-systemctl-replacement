@@ -960,6 +960,51 @@ class AppUnitTest(unittest.TestCase):
             self.assertEq(systemctl.get_substate_from(conf), "running")
         finally:
             os.chmod(F"{tmp}/piddir", 0o755)
+    def test_0440(self) -> None:
+        """ the state of a system unit is read from /run, where the system keeps it,
+            not from the private tree an unprivileged caller writes into """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        system_dir = F"{tmp}/run"
+        os.makedirs(system_dir, exist_ok=True)
+        text_file(F"{system_dir}/zz1.service.status", "MainPID=4242\n")
+        self.assertEq(systemctl.read_status_file_from(conf), F"{system_dir}/zz1.service.status")
+        self.rm_testdir()
+    def test_0441(self) -> None:
+        """ when nobody privileged keeps state in /run, this script is the manager
+            and its own tree is all there is """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        os.makedirs(F"{tmp}/run", exist_ok=True) # exists but holds no state
+        self.assertEq(systemctl.read_status_file_from(conf), systemctl.get_status_file_from(conf))
+        self.rm_testdir()
+    def test_0442(self) -> None:
+        """ writing is never redirected - an unprivileged caller must not be sent at
+            the system state, it writes into its own tree and fails there or not """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        os.makedirs(F"{tmp}/run", exist_ok=True)
+        text_file(F"{tmp}/run/zz1.service.status", "MainPID=4242\n")
+        written = systemctl.get_status_file_from(conf)
+        self.assertEq(written.endswith("zz1.service.status"), True)
+        self.assertEq(systemctl.read_status_file_from(conf), F"{tmp}/run/zz1.service.status")
+        self.rm_testdir()
+    def test_0443(self) -> None:
+        """ a unit that names its own StatusFile= means that path and nothing else """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zz2.service", """
+        [Service]
+        StatusFile = /var/lib/zz2.state
+        ExecStart = /usr/bin/true""")
+        os.makedirs(F"{tmp}/run", exist_ok=True)
+        text_file(F"{tmp}/run/zz2.state", "MainPID=4242\n")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        conf = systemctl.unitfiles.get_conf("zz2.service")
+        self.assertEq(systemctl.read_status_file_from(conf), F"{tmp}/var/lib/zz2.state")
         self.rm_testdir()
     def _nopidfile_unit(self, tmp: str) -> Any: # type: ignore[explicit-any]
         """ a unit with no PIDFile= at all - there is nobody else to ask, so our own
