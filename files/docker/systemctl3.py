@@ -1194,6 +1194,38 @@ def must_have_failed(waitpid: SystemctlWaitPID, cmd: List[str]) -> SystemctlWait
 def subprocess_waitpid(pid: int) -> SystemctlWaitPID:
     run_pid, run_stat = os.waitpid(pid, 0)
     return SystemctlWaitPID(run_pid, os.WEXITSTATUS(run_stat), os.WTERMSIG(run_stat))
+def subprocess_waitpid_timeout(pid: int, timeout: float) -> Tuple[SystemctlWaitPID, bool]:
+    """ wait for a control process, but not forever. systemd.service(5) on
+        TimeoutStopSec: "it configures the time to wait for each ExecStop=
+        command. If any of them times out, subsequent ExecStop= commands are
+        skipped and the service will be terminated by SIGTERM". Returns the
+        result and whether it had to be taken by force.
+        The wait is a poll on purpose - SIGALRM would be delivered to whichever
+        thread the runtime picks and would take down the notify listener. """
+    deadline = time.monotonic() + timeout
+    while True:
+        run_pid, run_stat = os.waitpid(pid, os.WNOHANG)
+        if run_pid:
+            return SystemctlWaitPID(run_pid, os.WEXITSTATUS(run_stat), os.WTERMSIG(run_stat)), False
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(WaitPollSec)
+    logg.error("control process %s did not return within %ss", pid, timeout)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except OSError as e:
+            logg.debug("kill control process %s >> %s", pid, e)
+        grace = time.monotonic() + MinimumYield
+        while time.monotonic() < grace:
+            run_pid, run_stat = os.waitpid(pid, os.WNOHANG)
+            if run_pid:
+                termsig = os.WTERMSIG(run_stat)
+                return SystemctlWaitPID(run_pid, termsig and 128 + termsig or os.WEXITSTATUS(run_stat), termsig), True
+            time.sleep(WaitPollSec)
+    run_pid, run_stat = os.waitpid(pid, 0) # SIGKILL can not be caught
+    termsig = os.WTERMSIG(run_stat)
+    return SystemctlWaitPID(run_pid, termsig and 128 + termsig or os.WEXITSTATUS(run_stat), termsig), True
 def subprocess_testpid(pid: int) -> SystemctlWaitPID:
     run_pid, run_stat = os.waitpid(pid, os.WNOHANG)
     if run_pid:
@@ -4891,17 +4923,26 @@ class Systemctl:
             if self.get_status_from(conf, "ActiveState", "unknown") == "inactive":
                 logg.warning("the service is already down once")
                 return True
+            timedout = False
             for cmd in conf.getlist(Service, "ExecStop", []):
                 exe, newcmd = self.unitfiles.expand_cmd(cmd, env, conf)
                 logg.info("%s stop %s", runs, shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
                     self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
-                run = subprocess_waitpid(forkpid)
-                if run.returncode and exe.check:
+                run, timedout = subprocess_waitpid_timeout(forkpid, timeout)
+                if timedout or (run.returncode and exe.check):
+                    # a timeout skips the remaining ExecStop commands even when the
+                    # command was prefixed with '-' - it is the unit that ran out of
+                    # time, not the command that reported a failure
                     returncode = run.returncode
                     service_result = "failed"
                     break
+            if timedout:
+                # "...and the service will be terminated by SIGTERM" - the second
+                # half of what systemd.service(5) says a stop timeout does
+                logg.info("%s stop timed out => systemctl kill", runs)
+                self.do_kill_unit_from(conf)
             if TRUE:
                 if returncode:
                     self.set_status_from(conf, "ExecStopCode", strE(returncode))
@@ -4920,6 +4961,7 @@ class Systemctl:
             size = os.path.exists(status_file) and os.path.getsize(status_file)
             logg.info("STATUS %s %s", status_file, size)
             pid = 0
+            timedout = False
             for cmd in conf.getlist(Service, "ExecStop", []):
                 env["MAINPID"] = strE(self.read_mainpid_from(conf))
                 exe, newcmd = self.unitfiles.expand_cmd(cmd, env, conf)
@@ -4927,13 +4969,18 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
-                run = subprocess_waitpid(forkpid)
+                run, timedout = subprocess_waitpid_timeout(forkpid, timeout)
                 run = must_have_failed(run, newcmd) # TODO: a workaround
                 # self.write_status_from(conf, MainPID=run.pid) # no ExecStop
-                if run.returncode and exe.check:
+                if timedout or (run.returncode and exe.check):
                     returncode = run.returncode
                     service_result = "failed"
                     break
+            if timedout:
+                # "...and the service will be terminated by SIGTERM" - the second
+                # half of what systemd.service(5) says a stop timeout does
+                logg.info("%s stop timed out => systemctl kill", runs)
+                self.do_kill_unit_from(conf)
             pid = to_intN(env.get("MAINPID"))
             if pid:
                 if self.wait_vanished_pid(pid, timeout):
@@ -4949,6 +4996,7 @@ class Systemctl:
         elif runs in ["forking"]:
             status_file = self.get_status_file_from(conf)
             pid_file = self.pid_file_from(conf)
+            timedout = False
             for cmd in conf.getlist(Service, "ExecStop", []):
                 # active = self.is_active_from(conf)
                 if pid_file:
@@ -4960,11 +5008,19 @@ class Systemctl:
                 forkpid = os.fork()
                 if not forkpid:
                     self.execve_from(conf, newcmd, env, exe.nouser) # pragma: no cover
-                run = subprocess_waitpid(forkpid)
-                if run.returncode and exe.check:
+                run, timedout = subprocess_waitpid_timeout(forkpid, timeout)
+                if timedout or (run.returncode and exe.check):
+                    # a timeout skips the remaining ExecStop commands even when the
+                    # command was prefixed with '-' - it is the unit that ran out of
+                    # time, not the command that reported a failure
                     returncode = run.returncode
                     service_result = "failed"
                     break
+            if timedout:
+                # "...and the service will be terminated by SIGTERM" - the second
+                # half of what systemd.service(5) says a stop timeout does
+                logg.info("%s stop timed out => systemctl kill", runs)
+                self.do_kill_unit_from(conf)
             pid = to_intN(env.get("MAINPID"))
             if pid:
                 if self.wait_vanished_pid(pid, timeout):
@@ -4987,15 +5043,16 @@ class Systemctl:
         # POST sequence
         if not self.is_active_from(conf):
             env["SERVICE_RESULT"] = service_result
+            timedout = False
             for cmd in conf.getlist(Service, "ExecStopPost", []):
                 exe, newcmd = self.unitfiles.expand_cmd(cmd, env, conf)
                 logg.info("post-stop %s", shell_cmd(newcmd))
                 forkpid = os.fork()
                 if not forkpid:
                     self.execve_from(conf, newcmd, env, self.run_as_root(conf, exe)) # pragma: no cover
-                run = subprocess_waitpid(forkpid)
-                logg.debug("post-stop done (%s) <-%s>",
-                           run.returncode or "OK", run.signal or "")
+                run, timedout = subprocess_waitpid_timeout(forkpid, timeout)
+                logg.debug("post-stop done (%s) <-%s>%s",
+                           run.returncode or "OK", run.signal or "", timedout and " TIMEOUT" or "")
         if self._only_what[0] not in ["none", "keep"]:
             self.remove_service_directories(conf)
         return service_result == "success"
