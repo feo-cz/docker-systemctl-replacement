@@ -14135,6 +14135,43 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_3730_systemctl_py_failing_child_leaves_the_parent_alone(self) -> None:
+        """ a fork child that cannot exec has to leave by os._exit. Leaving by
+            sys.exit unwinds the stack it inherited from the parent, which runs
+            the parent's cleanup inside the child - waitlock.__exit__ among it,
+            releasing a flock the parent still believes it holds. REMOVE_LOCK_FILE
+            makes that footprint visible: the child removes the lock file and the
+            parent then cannot. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(testdir, "zzw.service"), """
+            [Unit]
+            Description=Testing W
+            [Service]
+            Type=simple
+            WorkingDirectory=/there/is/no/such/directory
+            ExecStart=/bin/sleep 30
+            """)
+        copy_file(os_path(testdir, "zzw.service"), os_path(root, "/etc/systemd/system/zzw.service"))
+        #
+        cmd = "{systemctl} start zzw.service -vvv -c REMOVE_LOCK_FILE=1"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, out, err)
+        self.assertEqual(end, 1) # the unit does fail to start, that is the point
+        # the child redirects its own output into the journal of the unit before
+        # it gets as far as the workingdir, so that is where it is visible
+        journal = lines(reads(os_path(root, "/var/log/journal/zzw.service.log")))
+        logg.info("journal>\n\t%s", "\n\t".join(journal))
+        self.assertTrue(greps(journal, "bad workingdir")) # the child is the one that found out
+        self.assertFalse(greps(journal, "lockfile removed")) # and it left the parent's lock alone
+        self.assertTrue(greps(err, "lockfile removed")) # which the parent then removes itself
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def real_3801_start_some_unknown(self) -> None:
         self.test_3801_start_some_unknown(True)
     def test_3801_start_some_unknown(self, real: bool = False) -> None:

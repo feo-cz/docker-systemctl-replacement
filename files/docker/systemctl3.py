@@ -4511,6 +4511,14 @@ class Systemctl:
         # implicit: std.inp.close(), std.out.close(), std.err.close()
     def execve_from(self, conf: SystemctlConf, cmd: List[str], env: Dict[str, str]) -> NoReturn:
         """ this code is commonly run in a child process // returns exit-code"""
+        # a fork child inherits the handlers and the stack of its parent. Leave both
+        # behind before doing anything else: a signal arriving between the fork and
+        # the exec would otherwise raise KeyboardInterrupt here and unwind frames
+        # that belong to the manager, and every exit below is os._exit for the same
+        # reason - sys.exit would run the parent's waitlock.__exit__ inside the
+        # child, releasing a flock the parent still believes it holds.
+        for signum in (signal.SIGQUIT, signal.SIGINT, signal.SIGTERM):
+            signal.signal(signum, signal.SIG_DFL)
         runs = conf.get(Service, "Type", "simple").lower()
         # logg.debug("%s process for %s => %s", runs, strE(conf.name()), strQ(conf.filename()))
         self.dup2_journal_log(conf)
@@ -4523,20 +4531,20 @@ class Systemctl:
         badpath = self.chdir_workingdir(conf) # some dirs need setuid before
         if badpath:
             logg.error("(%s): bad workingdir: '%s'", shell_cmd(cmd), badpath)
-            sys.exit(1)
+            os._exit(1)
         env = self.extend_exec_env(env)
         env.update(envs) # set $HOME to ~$USER
         try:
             if EXEC_SPAWN:
                 cmd_args = [arg for arg in cmd] # satisfy mypy
                 exitcode = os.spawnvpe(os.P_WAIT, cmd[0], cmd_args, env)
-                sys.exit(exitcode)
+                os._exit(exitcode)
             else: # pragma: no cover
                 os.execve(cmd[0], cmd, env)
-                sys.exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
+                os._exit(11) # pragma: no cover (can not be reached / bug like mypy#8401)
         except (OSError, RuntimeError) as e:
             logg.error("(%s) >> %s", shell_cmd(cmd), e)
-            sys.exit(1)
+            os._exit(1)
     def test_start_unit(self, unit: str) -> None:
         """ helper function to test the code that is normally forked off """
         conf = self.unitfiles.load_conf(unit)
