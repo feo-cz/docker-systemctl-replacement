@@ -14135,6 +14135,80 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_3720_systemctl_py_init_loop_ends_on_shutdown_signal(self) -> None:
+        """ a shutdown request (the SIGQUIT that 'systemctl halt' sends to PID 1)
+            has to end the init-loop. It used to switch the loop over to waiting
+            for the machine to run out of processes, which in a container never
+            happens - journald, a login shell or anything else outside the unit
+            set keeps the count above zero - so halt could not complete and left
+            the container up with its services down and no way back in. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("sleep")
+        bindir = os_path(root, "/usr/bin")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testsleep} 99
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} enable zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        #
+        log_stdout = os.path.join(root, "systemctl.stdout.log")
+        log_stderr = os.path.join(root, "systemctl.stderr.log")
+        pid = os.fork()
+        if not pid:
+            new_stdout = os.open(log_stdout, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            new_stderr = os.open(log_stderr, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            os.dup2(new_stdout, 1)
+            os.dup2(new_stderr, 2)
+            # the default path, the way a container runs it: no modules, so the
+            # loop starts with no exit condition armed at all
+            systemctl_cmd = [_systemctl_py, "--root="+root, "init", "-vv"]
+            systemctl_cmd += ["-c", "InitLoopSleep=1"]
+            os.execve(_systemctl_py, systemctl_cmd, os.environ.copy())
+        time.sleep(3)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testsleep)) # the loop is up and the service runs
+        #
+        # halt_target() stops the units of the default target and then sends
+        # SIGQUIT to PID 1. Do both, to our own child - and leave everything else
+        # on this machine running, the way journald and a login shell keep running
+        # in a real container.
+        cmd = "{systemctl} stop zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        os.kill(pid, signal.SIGQUIT)
+        gone = False
+        for _ in xrange(15):
+            time.sleep(1)
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                gone = True
+                break
+        txt_stderr = lines(open(log_stderr))
+        logg.info("-- %s>\n\t%s", log_stderr, "\n\t".join(txt_stderr))
+        self.assertTrue(greps(txt_stderr, "SIGQUIT"))
+        self.assertTrue(gone) # the init-loop did end
+        #
+        kill_testsleep = "{systemctl} __killall {testsleep}"
+        sx____(kill_testsleep.format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def real_3801_start_some_unknown(self) -> None:
         self.test_3801_start_some_unknown(True)
     def test_3801_start_some_unknown(self, real: bool = False) -> None:

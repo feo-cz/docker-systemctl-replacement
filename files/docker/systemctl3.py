@@ -7057,9 +7057,16 @@ class Systemctl:
                 self.loop_lock.release()
             except KeyboardInterrupt as e:
                 if e.args and e.args[0] == "SIGQUIT":
-                    # the original systemd puts a coredump on that signal.
-                    logg.info("[init] SIGQUIT - switch to no more procs check")
-                    self.exit_mode = EXIT_NO_PROCS_LEFT
+                    # the original systemd puts a coredump on that signal - here it
+                    # is how 'systemctl halt' asks PID 1 to shut down. Arm the exit
+                    # conditions rather than replacing them with the stricter one:
+                    # "no procs left" counts every process on the machine, so in a
+                    # container that also runs journald, a login shell or anything
+                    # else outside our units it is never satisfied and the halt can
+                    # not complete. Our own units being down is the answer halt is
+                    # waiting for, and stopping them is what it just did.
+                    logg.info("[init] SIGQUIT - shutdown requested, leave when the units are down")
+                    self.exit_mode |= EXIT_NO_SERVICES_LEFT | EXIT_NO_PROCS_LEFT
                     continue
                 signal.signal(signal.SIGTERM, signal.SIG_DFL)
                 signal.signal(signal.SIGINT, signal.SIG_DFL)
