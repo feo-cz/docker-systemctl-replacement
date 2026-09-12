@@ -3926,14 +3926,24 @@ class Systemctl:
         self.wait_system()
         done = True
         started_units = []
-        for unit in self.unitfiles.sorted_after(units):
-            started_units.append(unit)
-            if not self.start_unit(unit):
-                done = False
         if init:
-            logg.info("init-loop start")
-            sig = self.init_loop_until_stop(started_units)
-            logg.info("init-loop %s", sig)
+            self.install_signal_handlers()
+        interrupted = ""
+        try:
+            for unit in self.unitfiles.sorted_after(units):
+                started_units.append(unit)
+                if not self.start_unit(unit):
+                    done = False
+        except KeyboardInterrupt as e:
+            if not init:
+                raise # a Control-C outside the init mode is not ours to swallow
+            interrupted = str(e) or "STOPPED"
+            logg.info("[init] interrupted while starting units - %s", interrupted)
+        if init:
+            if not interrupted:
+                logg.info("init-loop start")
+                sig = self.init_loop_until_stop(started_units)
+                logg.info("init-loop %s", sig)
             for unit in reversed(started_units):
                 self.stop_unit(unit)
         return done
@@ -6449,12 +6459,23 @@ class Systemctl:
             When --init is given then the init-loop is run and
             the services are stopped again by 'systemctl halt'."""
         target = self.get_default_target()
-        services = self.start_target_system(target, init)
+        if init:
+            self.install_signal_handlers()
+        interrupted = ""
+        try:
+            services = self.start_target_system(target, init)
+        except KeyboardInterrupt as e:
+            if not init:
+                raise # a Control-C outside the init mode is not ours to swallow
+            interrupted = str(e) or "STOPPED"
+            logg.info("[init] interrupted while starting - %s", interrupted)
+            services = self.target_default_services(target, "S")
         logg.info("%s system is up", target)
         if init:
-            logg.info("init-loop start")
-            sig = self.init_loop_until_stop(services)
-            logg.info("init-loop %s", sig)
+            if not interrupted:
+                logg.info("init-loop start")
+                sig = self.init_loop_until_stop(services)
+                logg.info("init-loop %s", sig)
             self.stop_system_default()
         return not not services
     def start_target_system(self, target: str, init: int = False) -> List[str]:
@@ -6714,15 +6735,22 @@ class Systemctl:
                    me, ["%+.3fs" % (t - now) for t in self._restart_failed_units.values()])
         return restart_done
 
+    def install_signal_handlers(self) -> None:
+        """ the signals that ask the manager to shut down. systemd(1) has these in
+            place "very early during boot" and announces over sd_notify when they
+            are, because a signal that arrives before that is gone without a trace:
+            PID 1 receives only the signals it has installed a handler for (kill(2),
+            NOTES). So these go up before the units are started, not after. """
+        signal.signal(signal.SIGQUIT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGQUIT"))
+        signal.signal(signal.SIGINT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGINT"))
+        signal.signal(signal.SIGTERM, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGTERM"))
     def init_loop_until_stop(self, units: List[str]) -> Optional[str]:
         """ this is the init-loop - it checks for any zombies to be reaped and
             waits for an interrupt. When a SIGTERM /SIGINT /Control-C signal
             is received then the signal name is returned. Any other signal will
             just raise an Exception like one would normally expect. As a special
             the 'systemctl halt' emits SIGQUIT which puts it into no_more_procs mode."""
-        signal.signal(signal.SIGQUIT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGQUIT"))
-        signal.signal(signal.SIGINT, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGINT"))
-        signal.signal(signal.SIGTERM, lambda signum, frame: ignore_signals_and_raise_keyboard_interrupt("SIGTERM"))
+        self.install_signal_handlers()
         result: Optional[str] = None
         #
         self.journal.start_log_files(units)
