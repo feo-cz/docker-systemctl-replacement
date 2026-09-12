@@ -12,7 +12,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     steps:
     - name: checkout software
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         path: software
     - name: 'refresh install'
@@ -34,7 +34,7 @@ jobs:
       run: |
         find . -name '*.xml'
     - name: 'publish testresults'
-      uses: EnricoMi/publish-unit-test-result-action@v1
+      uses: EnricoMi/publish-unit-test-result-action@v2
       with:
         commit: ${{ github.event.workflow_run.head_sha }}
         files: '**/TEST-*.xml'
