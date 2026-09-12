@@ -7057,50 +7057,58 @@ class Systemctl:
     def test_float(self) -> float:
         """ return 'Unknown result type' """
         return 0. # "Unknown result type"
-    def getEnvVarsFilePath(self):
-        return '/run/systemd/systemd.envs'
-    def getEnvVars(self):
-        fp = self.getEnvVarsFilePath()
-        vars = {}
-        if os.path.isfile(fp):
-            with open(fp, 'rb') as f:
-                vars = pickle.load(f)
-        return vars
-    def setEnvVar(self, varName, varValue = None):
-        vars = self.getEnvVars()
-        if varValue is None:
-            if varName in vars:
-                del vars[varName]
+    def get_environment_file(self) -> str:
+        """ where 'systemctl set-environment' keeps what it was given. systemd holds
+            this in the manager's memory; without a manager it has to be a file. """
+        return os_path(self._root, os.path.join(_notify_socket_folder, "systemd.envs"))
+    def read_environment_file(self) -> Dict[str, str]:
+        filename = self.get_environment_file()
+        environ: Dict[str, str] = {}
+        if os.path.isfile(filename):
+            try:
+                with open(filename, "rb") as f:
+                    environ = pickle.load(f)
+            except (OSError, ValueError, pickle.UnpicklingError) as e:
+                logg.warning("bad read of environment file '%s' >> %s", filename, e)
+        return environ
+    def write_environment_file(self, name: str, value: Optional[str] = None) -> None:
+        environ = self.read_environment_file()
+        if value is None:
+            environ.pop(name, None)
         else:
-            vars[varName] = varValue
-        with open(self.getEnvVarsFilePath(), 'wb') as f:
-            pickle.dump(vars, f)
-    def get_environment_modules(self, *args):
-        if len(args) == 0:
-            return 1        
-        varName = args[0]
-        vars = self.getEnvVars()
-        if varName in vars:
-            return vars[varName]
-        return ''
-    def set_environment_modules(self, *args):
-        if len(args) == 0:
-            return 1
-        boom = args[0].split('=', 2)
-        if len(boom) != 2:
-            return 2
-        varName = boom[0]
-        varValue = boom[1]
-        logg.debug("Set env variable %s to \"%s\"", varName, varValue)
-        self.setEnvVar(varName, varValue)
-        return 0
-    def unset_environment_modules(self, *args):
-        if len(args) == 0:
-            return 1        
-        varName = args[0]
-        logg.debug("Unset env variable %s", varName)
-        self.setEnvVar(varName)
-        return 0
+            environ[name] = value
+        filename = self.get_environment_file()
+        dirpath = os.path.dirname(filename)
+        if not os.path.isdir(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
+        try:
+            with open(filename, "wb") as f:
+                pickle.dump(environ, f)
+        except OSError as e:
+            logg.error("can not write environment file '%s' >> %s", filename, e)
+    def get_environment_modules(self, *args: str) -> Union[str, int]:
+        """ get-environment NAME -- print what set-environment was given """
+        if not args:
+            return NOT_OK
+        return self.read_environment_file().get(args[0], NIX)
+    def set_environment_modules(self, *args: str) -> int:
+        """ set-environment NAME=VALUE """
+        if not args:
+            return NOT_OK
+        setting = args[0].split("=", 1)
+        if len(setting) != 2:
+            return NOT_ACTIVE
+        name, value = setting[0], setting[1]
+        logg.debug("set environment %s to %s", name, strQ(value))
+        self.write_environment_file(name, value)
+        return NOT_A_PROBLEM
+    def unset_environment_modules(self, *args: str) -> int:
+        """ unset-environment NAME """
+        if not args:
+            return NOT_OK
+        logg.debug("unset environment %s", args[0])
+        self.write_environment_file(args[0])
+        return NOT_A_PROBLEM
 
 def print_begin(argv: List[str], args: List[str]) -> None:
     script = os.path.realpath(argv[0])

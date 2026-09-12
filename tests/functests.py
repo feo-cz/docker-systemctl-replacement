@@ -780,6 +780,54 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def test_0390(self) -> None:
+        """ set-environment / get-environment round trip, and the file is kept under
+            the runtime directory of the root we were pointed at """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(systemctl.get_environment_modules("FOO"), "")
+        self.assertEq(systemctl.set_environment_modules("FOO=bar"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "bar")
+        self.assertEq(os.path.isfile(systemctl.get_environment_file()), True)
+        self.assertEq(systemctl.get_environment_file().startswith(tmp), True)
+        self.rm_testdir()
+    def test_0391(self) -> None:
+        """ a second setting joins the first, and unset removes only its own """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.set_environment_modules("FOO=bar")
+        systemctl.set_environment_modules("BAZ=qux")
+        self.assertEq(systemctl.get_environment_modules("FOO"), "bar")
+        self.assertEq(systemctl.get_environment_modules("BAZ"), "qux")
+        self.assertEq(systemctl.unset_environment_modules("FOO"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "")
+        self.assertEq(systemctl.get_environment_modules("BAZ"), "qux")
+        self.rm_testdir()
+    def test_0392(self) -> None:
+        """ a value may contain '=' itself, and bad input is refused instead of
+            being stored under a half name """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(systemctl.set_environment_modules("FOO=a=b=c"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "a=b=c")
+        self.assertEq(systemctl.set_environment_modules("NOEQUALSIGN"), 2)
+        self.assertEq(systemctl.set_environment_modules(), 1)
+        self.assertEq(systemctl.get_environment_modules(), 1)
+        self.assertEq(systemctl.unset_environment_modules(), 1)
+        self.rm_testdir()
+    def test_0393(self) -> None:
+        """ unset of something never set is not an error, and reading a runtime
+            directory that does not exist yet answers empty rather than failing """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(os.path.isfile(systemctl.get_environment_file()), False)
+        self.assertEq(systemctl.get_environment_modules("NEVERSET"), "")
+        self.assertEq(systemctl.unset_environment_modules("NEVERSET"), 0)
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
