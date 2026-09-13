@@ -1240,8 +1240,13 @@ def time_span_usec(text: str) -> Optional[int]:
             scale //= 10
         something = True
     return usec if something else None
-def time_to_seconds(text: str, maximum: float) -> float:
+def time_to_seconds(text: str, maximum: float, default: Optional[str] = None, name: str = NIX) -> float:
     usec = time_span_usec(str(text))
+    if usec is None and default is not None and str(text).strip() != "infinity":
+        # systemd's conf-parser ignores a setting it cannot parse, with a warning, and the
+        # default stays (log_syntax_parse_error). Without a default the answer is the old one.
+        logg.warning("Failed to parse %s=%s, ignoring", name or "time", text)
+        return time_to_seconds(default, maximum)
     if usec: # a zero span keeps its old answer below, "0" is 0 and "0s" is 1
         seconds = usec / 1000000.
         if seconds > maximum:
@@ -1854,12 +1859,12 @@ class SystemctlUnitFiles:
             return [default] if default else []
         return targets
     def get_TimeoutStartSec(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> float:
-        timeout = conf.get(section, "TimeoutSec", default or strE(DefaultTimeoutStartSec))
-        timeout = conf.get(section, "TimeoutStartSec", timeout)
-        return time_to_seconds(timeout, DefaultMaximumTimeout)
+        fallback = default or strE(DefaultTimeoutStartSec)
+        timeout = time_to_seconds(conf.get(section, "TimeoutSec", fallback), DefaultMaximumTimeout, fallback, "TimeoutSec")
+        return time_to_seconds(conf.get(section, "TimeoutStartSec", strE(timeout)), DefaultMaximumTimeout, strE(timeout), "TimeoutStartSec")
     def get_SocketTimeoutSec(self, conf: SystemctlConf, section: str = Socket, default: Optional[str] = None) -> float:
-        timeout = conf.get(section, "TimeoutSec", default or strE(DefaultTimeoutStartSec))
-        return time_to_seconds(timeout, DefaultMaximumTimeout)
+        fallback = default or strE(DefaultTimeoutStartSec)
+        return time_to_seconds(conf.get(section, "TimeoutSec", fallback), DefaultMaximumTimeout, fallback, "TimeoutSec")
     def get_RemainAfterExit(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> bool:
         return conf.getbool(section, "RemainAfterExit", default or "no")
     def get_RuntimeDirectoryPreserve(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> bool:
@@ -1887,9 +1892,9 @@ class SystemctlUnitFiles:
     def get_WorkingDirectory(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> str:
         return conf.get(section, "WorkingDirectory", default or "")
     def get_TimeoutStopSec(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> float:
-        timeout = conf.get(section, "TimeoutSec", default or strE(DefaultTimeoutStartSec))
-        timeout = conf.get(section, "TimeoutStopSec", timeout)
-        return time_to_seconds(timeout, DefaultMaximumTimeout)
+        fallback = default or strE(DefaultTimeoutStopSec)
+        timeout = time_to_seconds(conf.get(section, "TimeoutSec", fallback), DefaultMaximumTimeout, fallback, "TimeoutSec")
+        return time_to_seconds(conf.get(section, "TimeoutStopSec", strE(timeout)), DefaultMaximumTimeout, strE(timeout), "TimeoutStopSec")
     def get_SendSIGKILL(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> bool:
         return conf.getbool(section, "SendSIGKILL", default or "yes")
     def get_SendSIGHUP(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None) -> bool:
@@ -1905,11 +1910,11 @@ class SystemctlUnitFiles:
         maximum = maximum or DefaultMaximumTimeout * 5
         defaults = DefaultStartLimitIntervalSec
         interval = conf.get(section, "StartLimitIntervalSec", default or strE(defaults)) # 10s
-        return time_to_seconds(interval, maximum)
+        return time_to_seconds(interval, maximum, default or strE(defaults), "StartLimitIntervalSec")
     def get_RestartSec(self, conf: SystemctlConf, section: str = Service, default: Optional[str] = None, maximum: Optional[int] = None) -> float:
         maximum = maximum or DefaultMaximumTimeout
         delay = conf.get(section, "RestartSec", default or strE(DefaultRestartSec))
-        return time_to_seconds(delay, maximum)
+        return time_to_seconds(delay, maximum, default or strE(DefaultRestartSec), "RestartSec")
     def get_description(self, unit: str, default: str = NIX) -> str:
         return self.get_Description(self.load_conf(unit)) or default
     def get_Description(self, conf: Optional[SystemctlConf], section: str = Unit, default: str = NIX) -> str: # -> text

@@ -1171,6 +1171,74 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(app.time_to_seconds("10min", 200), 200)
         self.assertEq(app.time_to_seconds("900", 200), 200)
 
+    def test_0550(self) -> None:
+        """ systemd.unit(5) settings it cannot parse are ignored with a warning and the
+            default stays - conf-parser "Failed to parse RestartSec=xxs, ignoring" - so a
+            unit with a broken RestartSec= waits the 100ms default, not 99s or 200s """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        for broken in ["xxs", "12.34.56", "3.sec", "-1", "5x"]:
+            text_file(F"{tmp}/{svc1}", F"""
+            [Service]
+            ExecStart=/bin/sleep 9
+            Restart=on-failure
+            RestartSec={broken}""")
+            unit = app.SystemctlUnitFiles()
+            unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+            conf = unit.get_conf(svc1)
+            with self.assertLogs(app.logg, level="WARNING") as logs:
+                have = unit.get_RestartSec(conf)
+            self.assertEq(have, 0.1, F"RestartSec={broken}")
+            self.assertTrue([line for line in logs.output if F"Failed to parse RestartSec={broken}, ignoring" in line], logs.output)
+        self.rm_testdir()
+    def test_0551(self) -> None:
+        """ TimeoutSec= sets the start and the stop timeout, TimeoutStartSec= and
+            TimeoutStopSec= override it - and when the override cannot be parsed it is
+            ignored, so TimeoutSec= is what remains (systemd.service(5)) """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9
+        TimeoutSec=5
+        TimeoutStartSec=bogus
+        TimeoutStopSec=1.2.3""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        with self.assertLogs(app.logg, level="WARNING"):
+            self.assertEq(unit.get_TimeoutStartSec(conf), 5)
+            self.assertEq(unit.get_TimeoutStopSec(conf), 5)
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9
+        TimeoutSec=never""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        with self.assertLogs(app.logg, level="WARNING"):
+            self.assertEq(unit.get_TimeoutStartSec(conf), app.DefaultTimeoutStartSec)
+            self.assertEq(unit.get_TimeoutStopSec(conf), app.DefaultTimeoutStopSec)
+        self.rm_testdir()
+    def test_0552(self) -> None:
+        """ what can be parsed is never warned about, zero and infinity included """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9
+        RestartSec=0
+        TimeoutStartSec=infinity
+        TimeoutStopSec=1min 30s""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        with self.assertNoLogs(app.logg, level="WARNING"):
+            self.assertEq(unit.get_RestartSec(conf), 0)
+            self.assertEq(unit.get_TimeoutStartSec(conf), app.DefaultMaximumTimeout)
+            self.assertEq(unit.get_TimeoutStopSec(conf), 90)
+        self.rm_testdir()
+
 if __name__ == "__main__":
     # unittest.main()
     suite = unittest.TestSuite()
