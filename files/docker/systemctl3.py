@@ -83,6 +83,8 @@ _only_what: List[str] = []
 _only_type: List[str] = []
 _only_state: List[str] = []
 _only_property: List[str] = []
+_kill_whom: str = NIX
+_kill_signal: str = NIX
 LOG_BUFSIZE = 8192
 FORCE_IPV4 = False
 FORCE_IPV6 = False
@@ -681,6 +683,45 @@ def _pid_zombie(pid: int) -> bool:
             logg.error("%s (%s) >> %s", check, e.errno, e)
         return False
     return False
+def signal_of(name: str) -> Optional[int]:
+    """ the signal number for --signal=, taking what systemd's signal_from_string
+        takes: a number, a name with or without the SIG prefix, RTMIN or RTMIN+n,
+        RTMAX or RTMAX-n. Names are case-sensitive; anything else gives None. """
+    if name.isdigit():
+        number = int(name)
+        return number if 0 < number < signal.NSIG else None
+    if name.startswith("SIG"):
+        name = name[len("SIG"):]
+    rtmin, rtmax = int(signal.SIGRTMIN), int(signal.SIGRTMAX)
+    for base, sign, value in [("RTMIN", "+", rtmin), ("RTMAX", "-", rtmax)]:
+        if name.startswith(base):
+            offset = name[len(base):]
+            if not offset:
+                return value
+            if offset[0] != sign or not offset[1:].isdigit():
+                return None
+            if int(offset[1:]) > rtmax - rtmin:
+                return None
+            return value + int(offset[1:]) if sign == "+" else value - int(offset[1:])
+    if not name.isalnum() or name != name.upper():
+        return None
+    found = getattr(signal, "SIG" + name, None)
+    if isinstance(found, signal.Signals):
+        return int(found)
+    return None
+def kill_whom_pidlist(whom: str, mainpid: Optional[int], pidlist: List[int]) -> Optional[List[int]]:
+    """ the processes that --kill-whom= picks for 'systemctl kill'. From systemctl(1):
+        'main' is only the main process, 'control' only the control process, and 'all'
+        every process of the unit - here the main process with its children, the same
+        set that KillMode=control-group takes. We do not keep track of control
+        processes, so 'control' never picks one. An unknown value gives None. """
+    if whom in ["main"]:
+        return [mainpid] if mainpid else []
+    if whom in ["control"]:
+        return []
+    if whom in ["all"]:
+        return list(pidlist)
+    return None
 
 def get_unit_type(module: str) -> Optional[str]:
     name, ext = os.path.splitext(module)
@@ -2958,6 +2999,8 @@ class Systemctl:
         self._only_property = commalist(_only_property)
         self._only_state = commalist(_only_state)
         self._only_type = commalist(_only_type)
+        self._kill_whom = _kill_whom
+        self._kill_signal = _kill_signal
         # some common constants that may be changed
         self._systemd_version = SystemCompatibilityVersion
         # and the actual internal runtime state
@@ -5071,6 +5114,9 @@ class Systemctl:
             return self.do_restart_unit_from(conf)
     def kill_modules(self, *modules: str) -> bool:
         """ kill [UNIT]... -- kill these units """
+        if self._kill_signal and signal_of(self._kill_signal) is None:
+            logg.error('Failed to parse signal string "%s".', self._kill_signal)
+            return False
         missing: List[str] = []
         units: List[str] = []
         for module in modules:
@@ -5101,6 +5147,8 @@ class Systemctl:
         if self.unitfiles.not_user_conf(conf):
             logg.error("Unit %s not for --user mode", unit)
             return False
+        if self._kill_signal or self._kill_whom:
+            return self.signal_unit_from(conf)
         return self.kill_unit_from(conf)
     def kill_unit_from(self, conf: SystemctlConf) -> bool:
         if not conf:
@@ -5108,6 +5156,32 @@ class Systemctl:
         with waitlock(conf):
             logg.info(" kill unit %s => %s", conf.name(), strQ(conf.filename()))
             return self.do_kill_unit_from(conf)
+    def signal_unit_from(self, conf: SystemctlConf) -> bool:
+        """ kill -s SIG --kill-whom=WHOM -- systemctl(1) sends the signal to the chosen
+            processes once and that is all: no waiting for them, no SIGKILL after it, no
+            change to the state of the unit. Without either option kill still goes on to
+            do_kill_unit_from as it always did. No waitlock either - a unit may well be
+            told to reopen its logs while a start or a reload of it holds the lock. """
+        unit = conf.name()
+        whom = self._kill_whom or "all"
+        signo = signal_of(self._kill_signal or "TERM") or signal.SIGTERM
+        mainpid = self.read_mainpid_from(conf)
+        if mainpid and (not pid_exists(mainpid) or pid_zombie(mainpid)):
+            mainpid = None
+        pidlist = kill_whom_pidlist(whom, mainpid, self.pidlist_of(mainpid))
+        if pidlist is None:
+            logg.error("Failed to kill unit %s: Invalid whom argument: %s", unit, whom)
+            return False
+        if whom in ["control"]:
+            logg.error("Failed to kill unit %s: No control process to kill", unit)
+            return False
+        if whom in ["main"] and not mainpid:
+            logg.error("Failed to kill unit %s: No main process to kill", unit)
+            return False
+        for pid in pidlist:
+            logg.info("kill signal %s to PID %s of %s", signo, pid, unit)
+            self._kill_pid(pid, signo)
+        return True
     def do_kill_unit_from(self, conf: SystemctlConf) -> bool:
         started = time.monotonic()
         doSendSIGKILL = self.unitfiles.get_SendSIGKILL(conf)
@@ -7264,6 +7338,7 @@ def main() -> int:
     # pylint: disable=global-statement
     global _extra_vars, _force, _full, _log_lines, _no_pager, _no_reload, _no_legend, _no_ask_password
     global _now, _preset_mode, _quiet, _root, _show_all, _only_state, _only_type, _only_property, _only_what
+    global _kill_whom, _kill_signal
     global DefaultMaximumTimeout, INIT_MODE, EXIT_MODE, _user_mode, FORCE_IPV4, FORCE_IPV6
     import optparse # pylint: disable=deprecated-module # not anymore
     _o = optparse.OptionParser("%prog [options] command [name...]", description=__doc__.strip(),
@@ -7298,10 +7373,10 @@ def main() -> int:
                   help="When showing sockets, explicitly show their type (ignored)")
     _o.add_option("-i", "--ignore-inhibitors", action="store_true",
                   help="When shutting down or sleeping, ignore inhibitors (ignored)")
-    _o.add_option("--kill-who", metavar="WHO",
-                  help="Who to send signal to (ignored)")
-    _o.add_option("-s", "--signal", metavar="SIG",
-                  help="Which signal to send (ignored)")
+    _o.add_option("--kill-whom", "--kill-who", metavar="WHOM", dest="kill_whom", default=_kill_whom,
+                  help="Whom to send signal to with kill: main, control or all [all]")
+    _o.add_option("-s", "--signal", metavar="SIG", default=_kill_signal,
+                  help="Which signal to send with kill [SIGTERM]")
     _o.add_option("--now", action="count", default=_now,
                   help="Start or stop unit in addition to enabling or disabling it")
     _o.add_option("-q", "--quiet", action="store_true", default=_quiet,
@@ -7370,6 +7445,8 @@ def main() -> int:
     _quiet = opt.quiet
     _root = opt.root
     _show_all = int(opt.show_all)
+    _kill_whom = opt.kill_whom
+    _kill_signal = opt.signal
     _only_state = opt.only_state
     _only_type = opt.only_type
     _only_property = opt.only_property

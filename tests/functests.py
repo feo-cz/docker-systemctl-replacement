@@ -13,6 +13,7 @@ import shutil
 import inspect
 import unittest
 import logging
+import signal
 import os.path
 from fnmatch import fnmatchcase as fnmatch
 
@@ -1118,6 +1119,36 @@ class AppUnitTest(unittest.TestCase):
         app.logg.info("======== module")
         systemctl.log_modules("test1")
         app.logg.info("======== DONE")
+
+    def test_0530(self) -> None:
+        """ systemctl(1) --signal= takes what systemd's signal_from_string takes: a
+            number, a name with or without the SIG prefix, RTMIN+n and RTMAX-n. Names
+            are case-sensitive, and anything else is refused rather than guessed. """
+        self.assertEq(app.signal_of("HUP"), signal.SIGHUP)
+        self.assertEq(app.signal_of("SIGHUP"), signal.SIGHUP)
+        self.assertEq(app.signal_of("1"), signal.SIGHUP)
+        self.assertEq(app.signal_of("TERM"), signal.SIGTERM)
+        self.assertEq(app.signal_of("SIGKILL"), signal.SIGKILL)
+        self.assertEq(app.signal_of("RTMIN"), signal.SIGRTMIN)
+        self.assertEq(app.signal_of("RTMIN+1"), signal.SIGRTMIN + 1)
+        self.assertEq(app.signal_of("SIGRTMAX"), signal.SIGRTMAX)
+        self.assertEq(app.signal_of("RTMAX-1"), signal.SIGRTMAX - 1)
+        for refused in ["hup", "BOGUS", "0", str(signal.NSIG), "", "SIG", "SIG_DFL",
+                        "RTMIN+99", "RTMAX-99", "RTMIN-1"]:
+            self.assertEq(app.signal_of(refused), None, F"signal_of({refused!r})")
+    def test_0531(self) -> None:
+        """ systemctl(1) --kill-whom= picks which processes of the unit get the signal:
+            main is only the main process, all is every process of the unit - here the
+            main process with its children. We do not keep track of control processes,
+            so control never picks one. An unknown value picks nothing at all. """
+        pidlist = [100, 101, 102]
+        self.assertEq(app.kill_whom_pidlist("main", 100, pidlist), [100])
+        self.assertEq(app.kill_whom_pidlist("all", 100, pidlist), [100, 101, 102])
+        self.assertEq(app.kill_whom_pidlist("control", 100, pidlist), [])
+        self.assertEq(app.kill_whom_pidlist("main", None, []), [])
+        self.assertEq(app.kill_whom_pidlist("all", None, []), [])
+        self.assertEq(app.kill_whom_pidlist("bogus", 100, pidlist), None)
+        self.assertEq(app.kill_whom_pidlist("Main", 100, pidlist), None)
 
 if __name__ == "__main__":
     # unittest.main()
