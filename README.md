@@ -3,6 +3,80 @@
 [![Unit Tests](https://github.com/feo-cz/docker-systemctl-replacement/actions/workflows/unittests.yml/badge.svg?event=push&branch=master)](https://github.com/feo-cz/docker-systemctl-replacement/actions/workflows/unittests.yml)
 [![PyPI version](https://badge.fury.io/py/docker-systemctl-replacement.svg)](https://pypi.org/project/docker-systemctl-replacement/)
 
+# This fork
+
+A fork of [gdraheim/docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement),
+rebased onto upstream v1.7.1311. Everything below this section is the
+upstream README and describes the upstream project.
+
+The work here sits on its own topic branches so that any of it can be
+taken one piece at a time; `master` is their merge. Each branch carries a
+test that fails without it. Numbers below are measured, not estimated.
+
+**Answers that were wrong**
+
+* an unreadable `PIDFile=` no longer makes the state `unknown` - an
+  unprivileged caller gets the same answer as root. An *absent* PIDFile
+  still means `inactive`: the application has spoken and that is complete
+* a template instance gets its own conf instead of sharing the template's,
+  so every instance but the last stopped losing its recorded state
+* an enabled instance link is read as an instance, not as an alias
+* `enable --now` and `disable --now` report a start or stop that failed
+  instead of returning success
+* a clean shutdown of the init loop exits 0, not 1
+* `systemctl show -p path` on a unit with no file reports an empty path
+
+**Shutdown and signals**
+
+* `KillMode=` decides who is signalled *and* who is waited for. Waiting on
+  processes it never touched made every stop of an `ssh`, `cron` or
+  `puppet` unit burn its whole `TimeoutStopSec`: measured 30.9s -> 1.0s
+* a shutdown request can end the init loop. It used to switch to waiting
+  for the machine to run out of processes, which a container running
+  journald or holding one login shell never does - the units went down,
+  PID 1 stayed up and the restart policy never fired
+* the signal handlers go up before the units are started, not after. As
+  PID 1 that is not a late handler but no handler at all: measured on a
+  container, an 8.75s window in which eight SIGTERMs vanished without a
+  trace. Now zero
+* a fork child leaves by `os._exit` and cannot unwind into the manager's
+  frames, whatever happens - including an exception before the exec
+* an `ExecStop=` that hangs no longer holds the stop open: 32.7s against
+  `TimeoutStopSec=2`, now 4.0s, and the service is actually gone
+* `/sbin/{reboot,halt,poweroff,shutdown,telinit}` dispatch on `argv[0]`
+  the way systemd does. Typing `reboot` used to print a unit listing and
+  return success. `reboot` and `poweroff` exist as commands now
+
+**Files, permissions and noise**
+
+* our runtime files do not depend on the caller's umask, and the five
+  `*DirectoryMode=` settings default to 0755 as `systemd.exec(5)` says
+* a `PIDFile=` we may not stat is the normal case for an unprivileged
+  caller, not a warning on every query
+* `journalctl` for a unit that logged nothing answers `-- No entries --`
+  with exit 0, matching the real journalctl byte for byte, instead of
+  failing and burying the error it was being asked to fetch
+* the `mount*` ignore pattern, lost upstream in `0b02699b` when the ignore
+  lists were rewritten
+
+**Additions**
+
+* `PermissionsStartOnly=` and the `+` prefix on `Exec*` lines
+* `[get|set|unset]-environment`
+* `journalctl --since` accepted and ignored, the way deployment tooling
+  passes it
+* `list-unit-files` honours its state filter, its mask filter and every
+  PATTERN given
+* `unmask` keeps a unit file that is a symlink to something other than
+  `/dev/null`
+* service aliases resolved consistently
+
+**Checks**
+
+`make lint`, `make testlocal` and `make type` are green here - see the
+badges above. The heavy suite is `make exectests`: 254 tests, no
+failures. `make testlocal` is 129 in-process tests in about five seconds.
+
 # docker systemctl replacement
 
 This script may be used to overwrite "/usr/bin/systemctl".
