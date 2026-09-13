@@ -2065,7 +2065,9 @@ class AppUnitTest(unittest.TestCase):
         systemctl = app.Systemctl(tmp)
         found = systemctl.unitfiles.scan_unit_files()
         logg.info("found %s", found)
-        self.assertEq(found, ["test2.service", "test1.service"])
+        # sorted: the order comes straight out of os.listdir and is whatever the
+        # filesystem hands back - it differs between this machine and a CI runner
+        self.assertEq(sorted(found), ["test1.service", "test2.service"])
         conf = systemctl.unitfiles.get_conf("test2.service")
         have = conf.get("Service", "ExecStartPre", "")
         logg.info("have %s", have)
