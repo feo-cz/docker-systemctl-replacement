@@ -6052,6 +6052,8 @@ class Systemctl:
            for formatted human-readable output.
            /
            NOTE: only a subset of properties is implemented """
+        if not modules:
+            return self.show_items(self.show_manager_items())
         notfound: List[str] = []
         units: List[str] = []
         missing: List[str] = []
@@ -6074,15 +6076,23 @@ class Systemctl:
         for unit in units:
             if result:
                 result += [""]
-            for var, value in self.show_unit_items(unit):
-                if self._only_property:
-                    if var not in self._only_property:
-                        continue
-                else:
-                    if not value and not self._show_all:
-                        continue
-                result += ["%s=%s" % (var, value)]
+            result += self.show_items(self.show_unit_items(unit))
         return result
+    def show_items(self, items: Iterable[Tuple[str, str]]) -> List[str]:
+        result: List[str] = []
+        for var, value in items:
+            if self._only_property:
+                if var not in self._only_property:
+                    continue
+            else:
+                if not value and not self._show_all:
+                    continue
+            result += ["%s=%s" % (var, value)]
+        return result
+    def show_manager_items(self) -> Iterable[Tuple[str, str]]:
+        """ the properties of the manager itself, for 'show' without a unit """
+        yield "Version", str(self._systemd_version)
+        yield "Features", self.systemd_features()
     def show_unit_items(self, unit: str) -> Iterable[Tuple[str, str]]:
         """ __show_unit_items [UNIT] -- show properties of a unit.
         """
