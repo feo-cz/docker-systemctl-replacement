@@ -2211,6 +2211,28 @@ class AppUnitTest(unittest.TestCase):
         systemctl.log_modules("test1")
         app.logg.info("======== DONE")
 
+    def test_0520(self) -> None:
+        """ systemctl(1): 'show' without an argument shows the properties of the
+            manager itself, and -p Version selects its version - the systemd
+            compatibility level that --version reports as well """
+        tmp = self.testdir()
+        systemctl = app.Systemctl(tmp)
+        systemctl._only_property = ["Version"] # pylint: disable=protected-access
+        have = systemctl.show_modules()
+        logg.info("have %s", have)
+        self.assertEq(have, [F"Version={app.SystemCompatibilityVersion}"])
+        self.rm_testdir()
+    def test_0521(self) -> None:
+        """ without -p the manager properties are listed, Features in the same
+            +/- notation as the second line of --version """
+        tmp = self.testdir()
+        systemctl = app.Systemctl(tmp)
+        have = systemctl.show_modules()
+        logg.info("have %s", have)
+        self.assertIn(F"Version={app.SystemCompatibilityVersion}", have)
+        self.assertIn(F"Features={systemctl.systemd_features()}", have)
+        self.rm_testdir()
+
 if __name__ == "__main__":
     # unittest.main()
     suite = unittest.TestSuite()

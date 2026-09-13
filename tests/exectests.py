@@ -5831,6 +5831,43 @@ class SystemctlBaseTest(unittest.TestCase):
         self.assertEqual(lines(out), ["PIDFile="])
         self.rm_testdir()
         self.coverage()
+    def test_2222_show_manager_can_be_restricted_to_one_property(self) -> None:
+        """ check that 'show' without a unit shows the manager (systemctl(1)),
+            with the same version that --version reports"""
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        cmd = "{systemctl} --version"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        found = re.match(r"systemd (\d+)", out)
+        self.assertTrue(found)
+        version = found.group(1) if found else ""
+        #
+        cmd = "{systemctl} show -p Version"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        self.assertEqual(lines(out), [F"Version={version}"])
+        #
+        cmd = "{systemctl} --user show --property=Version,Features"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        self.assertEqual(len(lines(out)), 2)
+        self.assertTrue(greps(out, F"^Version={version}$"))
+        self.assertTrue(greps(out, r"^Features=[-+]"))
+        #
+        cmd = "{systemctl} show"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        self.assertTrue(greps(out, F"^Version={version}$"))
+        self.assertTrue(greps(out, r"^Features=[-+]"))
+        self.rm_testdir()
+        self.coverage()
     def test_2225_show_unit_for_multiple_matches(self) -> None:
         """ check that the result of 'show UNIT' for multiple services is
             concatenated but still machine readable. """
