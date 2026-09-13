@@ -14143,6 +14143,166 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_3720_systemctl_py_init_loop_ends_on_shutdown_signal(self) -> None:
+        """ a shutdown request (the SIGQUIT that 'systemctl halt' sends to PID 1)
+            has to end the init-loop. It used to switch the loop over to waiting
+            for the machine to run out of processes, which in a container never
+            happens - journald, a login shell or anything else outside the unit
+            set keeps the count above zero - so halt could not complete and left
+            the container up with its services down and no way back in. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("sleep")
+        bindir = os_path(root, "/usr/bin")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testsleep} 99
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} enable zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        #
+        log_stdout = os.path.join(root, "systemctl.stdout.log")
+        log_stderr = os.path.join(root, "systemctl.stderr.log")
+        pid = os.fork()
+        if not pid:
+            new_stdout = os.open(log_stdout, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            new_stderr = os.open(log_stderr, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            os.dup2(new_stdout, 1)
+            os.dup2(new_stderr, 2)
+            # the default path, the way a container runs it: no modules, so the
+            # loop starts with no exit condition armed at all
+            systemctl_cmd = [_systemctl_py, "--root="+root, "init", "-vv"]
+            systemctl_cmd += ["-c", "InitLoopSleep=1"]
+            os.execve(_systemctl_py, systemctl_cmd, os.environ.copy())
+        time.sleep(3)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testsleep)) # the loop is up and the service runs
+        #
+        # halt_target() stops the units of the default target and then sends
+        # SIGQUIT to PID 1. Do both, to our own child - and leave everything else
+        # on this machine running, the way journald and a login shell keep running
+        # in a real container.
+        cmd = "{systemctl} stop zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        os.kill(pid, signal.SIGQUIT)
+        gone = False
+        for _ in xrange(15):
+            time.sleep(1)
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                gone = True
+                break
+        txt_stderr = lines(open(log_stderr))
+        logg.info("-- %s>\n\t%s", log_stderr, "\n\t".join(txt_stderr))
+        self.assertTrue(greps(txt_stderr, "SIGQUIT"))
+        self.assertTrue(gone) # the init-loop did end
+        #
+        kill_testsleep = "{systemctl} __killall {testsleep}"
+        sx____(kill_testsleep.format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_3730_systemctl_py_failing_child_leaves_the_parent_alone(self) -> None:
+        """ a fork child that cannot exec has to leave by os._exit. Leaving by
+            sys.exit unwinds the stack it inherited from the parent, which runs
+            the parent's cleanup inside the child - waitlock.__exit__ among it,
+            releasing a flock the parent still believes it holds. REMOVE_LOCK_FILE
+            makes that footprint visible: the child removes the lock file and the
+            parent then cannot. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(testdir, "zzw.service"), """
+            [Unit]
+            Description=Testing W
+            [Service]
+            Type=simple
+            WorkingDirectory=/there/is/no/such/directory
+            ExecStart=/bin/sleep 30
+            """)
+        copy_file(os_path(testdir, "zzw.service"), os_path(root, "/etc/systemd/system/zzw.service"))
+        #
+        cmd = "{systemctl} start zzw.service -vvv -c REMOVE_LOCK_FILE=1"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, out, err)
+        self.assertEqual(end, 1) # the unit does fail to start, that is the point
+        # the child redirects its own output into the journal of the unit before
+        # it gets as far as the workingdir, so that is where it is visible
+        journal = lines(reads(os_path(root, "/var/log/journal/zzw.service.log")))
+        logg.info("journal>\n\t%s", "\n\t".join(journal))
+        self.assertTrue(greps(journal, "bad workingdir")) # the child is the one that found out
+        self.assertFalse(greps(journal, "lockfile removed")) # and it left the parent's lock alone
+        self.assertTrue(greps(err, "lockfile removed")) # which the parent then removes itself
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_3740_systemctl_py_shutdown_signal_during_startup(self) -> None:
+        """ the manager has to listen for a shutdown signal from the moment it
+            starts working, not from the moment it is done starting units.
+            systemd(1) puts its handlers up "very early during boot" and says so
+            over sd_notify, because a signal that arrives before that is simply
+            gone - PID 1 receives only the signals it has a handler for. Ours went
+            up after the units, which on a real container is several seconds in
+            which the manager cannot be asked to stop. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(testdir, "zzslow.service"), """
+            [Unit]
+            Description=Testing slow to start
+            [Service]
+            Type=simple
+            ExecStartPre=/bin/sleep 6
+            ExecStart=/bin/sleep 60
+            """)
+        copy_file(os_path(testdir, "zzslow.service"), os_path(root, "/etc/systemd/system/zzslow.service"))
+        #
+        log_stdout = os.path.join(root, "systemctl.stdout.log")
+        log_stderr = os.path.join(root, "systemctl.stderr.log")
+        pid = os.fork()
+        if not pid:
+            new_stdout = os.open(log_stdout, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            new_stderr = os.open(log_stderr, os.O_WRONLY |os.O_CREAT |os.O_TRUNC)
+            os.dup2(new_stdout, 1)
+            os.dup2(new_stderr, 2)
+            systemctl_cmd = [_systemctl_py, "--root="+root, "init", "zzslow.service", "-vv"]
+            systemctl_cmd += ["-c", "InitLoopSleep=1"]
+            os.execve(_systemctl_py, systemctl_cmd, os.environ.copy())
+        time.sleep(2) # well inside the six seconds of ExecStartPre
+        os.kill(pid, signal.SIGTERM)
+        done, status = os.waitpid(pid, 0)
+        txt_stderr = lines(open(log_stderr))
+        logg.info("-- %s>\n\t%s", log_stderr, "\n\t".join(txt_stderr))
+        #
+        self.assertFalse(os.WIFSIGNALED(status)) # not killed where it stood
+        self.assertTrue(os.WIFEXITED(status))
+        self.assertEqual(os.WEXITSTATUS(status), 0) # a shutdown that was asked for
+        self.assertTrue(greps(txt_stderr, "interrupted"))
+        self.assertTrue(greps(txt_stderr, "init is done"))
+        #
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def real_3801_start_some_unknown(self) -> None:
         self.test_3801_start_some_unknown(True)
     def test_3801_start_some_unknown(self, real: bool = False) -> None:
@@ -20925,6 +21085,55 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_4170_systemctl_stop_honours_its_timeout(self) -> None:
+        """ systemd.service(5) on TimeoutStopSec: "it configures the time to wait
+            for each ExecStop= command. If any of them times out, subsequent
+            ExecStop= commands are skipped and the service will be terminated by
+            SIGTERM". We waited for the control process with a plain waitpid, so
+            an ExecStop that hangs held the whole stop for as long as it liked. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("sleep")
+        bindir = os_path(root, "/usr/bin")
+        text_file(os_path(testdir, "zzt.service"), """
+            [Unit]
+            Description=Testing T
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testsleep} 300
+            ExecStop=/bin/sleep 30
+            TimeoutStopSec=2
+            """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzt.service"), os_path(root, "/etc/systemd/system/zzt.service"))
+        #
+        cmd = "{systemctl} start zzt.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        top = _recent(output(_top_list))
+        self.assertTrue(greps(top, testsleep))
+        #
+        started = time.monotonic()
+        cmd = "{systemctl} stop zzt.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        lapse = time.monotonic() - started
+        logg.info(" %s =>%s (%.1fs)\n%s", cmd, end, lapse, out)
+        #
+        self.assertLess(lapse, 15) # the ExecStop sleeps for thirty
+        time.sleep(1)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertFalse(greps(top, testsleep)) # and the service is gone with it
+        #
+        kill_testsleep = "{systemctl} __killall {testsleep}"
+        sx____(kill_testsleep.format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def test_4201_systemctl_py_dependencies_plain_start_order(self) -> None:
         """ check list-dependencies - standard order of starting
             units is simply the command line order"""
@@ -21777,6 +21986,37 @@ class SystemctlBaseTest(unittest.TestCase):
         #
         kill_testsleep = "{systemctl} __killall {testsleep}"
         sx____(kill_testsleep.format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_4310_journal_of_a_unit_that_logged_nothing(self) -> None:
+        """ asking for the journal of a unit that has not logged anything is a
+            question with an answer - nothing - and not a failure. We handed the
+            missing path to tail, which failed, and the exit code said the command
+            had gone wrong. The systemd provider of puppet runs exactly this
+            command while it reports that a service failed to start, so the error
+            of the tool buried the error it was fetching. """
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        root = self.root(testdir)
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        text_file(os_path(root, "/etc/systemd/system/zzj.service"), """
+            [Unit]
+            Description=Testing J
+            [Service]
+            ExecStart=/bin/true
+            """)
+        os.makedirs(os_path(root, "/var/log/journal"), exist_ok=True)
+        #
+        cmd = "{systemctl} log zzj.service -n 50 --no-pager"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, out, err)
+        self.assertEqual(end, 0)
+        self.assertEqual(out, "-- No entries --\n") # measured against systemd 257
+        self.assertFalse(greps(err, "cannot open")) # no complaint about the file
+        self.assertFalse(greps(err, "CRITICAL")) # and no debug print left behind
+        #
         self.rm_testdir()
         self.coverage()
         self.end()

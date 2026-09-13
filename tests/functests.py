@@ -11,6 +11,8 @@ import sys
 import re
 import shutil
 import inspect
+import time
+import signal
 import unittest
 import logging
 import os.path
@@ -55,6 +57,8 @@ if __name__ == "__main__":
         logg.info("log diverted to %s", opt.logfile)
 
 logg.warning("importing %s", SYSTEMCTL)
+sys.path.insert(0, os.path.dirname(SYSTEMCTL) or ".")
+import journalctl3 as journalctl # pylint: disable=wrong-import-position,import-error
 if "files/docker/systemctl3" in SYSTEMCTL:
     sys.path = [os.curdir] + sys.path
     from files.docker import systemctl3 as app # pylint: disable=wrong-import-position,import-error,no-name-in-module
@@ -780,6 +784,1092 @@ class AppUnitTest(unittest.TestCase):
         have = unit.get_Description(conf)
         self.assertEqual(want, have)
         self.rm_testdir()
+    def test_0350(self) -> None:
+        """ PermissionsStartOnly=yes is off by default """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        self.assertEq(unit.get_PermissionsStartOnly(conf), False)
+        self.rm_testdir()
+    def test_0351(self) -> None:
+        """ PermissionsStartOnly=yes is read from the [Service] section """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        PermissionsStartOnly = yes
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        self.assertEq(unit.get_PermissionsStartOnly(conf), True)
+        self.assertEq(unit.get_User(conf), "someone")
+        self.rm_testdir()
+    def test_0352(self) -> None:
+        """ the '+' prefix of an Exec line is reported as nouser, so that the
+            step runs privileged even when the service has a User= """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStartPre = +/usr/bin/true
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        env = unit.get_env(conf)
+        for cmd in conf.getlist("Service", "ExecStartPre", []):
+            exe, newcmd = unit.expand_cmd(cmd, env, conf)
+            self.assertEq(newcmd, ["/usr/bin/true"])
+            self.assertEq(exe.nouser, True)
+        for cmd in conf.getlist("Service", "ExecStart", []):
+            exe, newcmd = unit.expand_cmd(cmd, env, conf)
+            self.assertEq(exe.nouser, False)
+        self.rm_testdir()
+    def test_0354(self) -> None:
+        """ run_as_root() is the decision the Exec steps make: either the unit says
+            PermissionsStartOnly=yes, or the single step is prefixed with '+' """
+        tmp = self.testdir()
+        svc1, svc2 = "test1.service", "test2.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        User = someone
+        ExecStartPre = +/usr/bin/true
+        ExecStart = /usr/bin/true""")
+        text_file(F"{tmp}/{svc2}", """
+        [Service]
+        User = someone
+        PermissionsStartOnly = yes
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        unit.add_unit_file(svc2, F"{tmp}/{svc2}")
+        systemctl = app.Systemctl()
+        conf1 = unit.get_conf(svc1)
+        env1 = unit.get_env(conf1)
+        pre = conf1.getlist("Service", "ExecStartPre", [])[0]
+        exe, _newcmd = unit.expand_cmd(pre, env1, conf1)
+        self.assertEq(systemctl.run_as_root(conf1, exe), True)   # '+' prefix
+        start = conf1.getlist("Service", "ExecStart", [])[0]
+        exe, _newcmd = unit.expand_cmd(start, env1, conf1)
+        self.assertEq(systemctl.run_as_root(conf1, exe), False)  # plain, has User=
+        conf2 = unit.get_conf(svc2)
+        env2 = unit.get_env(conf2)
+        start = conf2.getlist("Service", "ExecStart", [])[0]
+        exe, _newcmd = unit.expand_cmd(start, env2, conf2)
+        self.assertEq(systemctl.run_as_root(conf2, exe), True)   # PermissionsStartOnly
+        self.rm_testdir()
+    def test_0353(self) -> None:
+        """ '!' is the other spelling of the same thing, and the prefixes
+            combine with '-' (no-check) in any order """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStartPre = !/usr/bin/true
+        ExecStartPost = -+/usr/bin/true
+        ExecStop = +-/usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        env = unit.get_env(conf)
+        for name, nouser, check in [("ExecStartPre", True, True), ("ExecStartPost", True, False), ("ExecStop", True, False)]:
+            for cmd in conf.getlist("Service", name, []):
+                exe, newcmd = unit.expand_cmd(cmd, env, conf)
+                self.assertEq(newcmd, ["/usr/bin/true"], name)
+                self.assertEq(exe.nouser, nouser, name)
+                self.assertEq(exe.check, check, name)
+        self.rm_testdir()
+    def test_0360(self) -> None:
+        """ journalctl --since is accepted and ignored - deployment tooling passes it
+            and systemd would not fail on it either """
+        parser = journalctl.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service", "--since", "yesterday"])
+        self.assertEq(args.unit, "zzz.service")
+        self.assertEq(args.since, "yesterday")
+        cmd = journalctl.systemctl_command(args)
+        self.assertEq("--since" in cmd, False)
+        self.assertEq("yesterday" in cmd, False)
+    def test_0361(self) -> None:
+        """ it calls the tool by the name it is installed under, 'systemctl' """
+        parser = journalctl.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service"])
+        self.assertEq(journalctl.systemctl_command(args), ["systemctl", "log", "zzz.service"])
+        self.assertEq(journalctl.systemctl_command(args, "/bin"), ["/bin/systemctl", "log", "zzz.service"])
+    def test_0362(self) -> None:
+        """ the other options are translated, and -u itself is dropped """
+        parser = journalctl.argument_parser()
+        args = parser.parse_args(["-u", "zzz.service", "-f", "-n", "5", "--no-pager", "--root", "/R", "-x"])
+        cmd = journalctl.systemctl_command(args)
+        self.assertEq(cmd, ["systemctl", "log", "zzz.service", "-f", "-n", "5", "--no-pager", "--root", "/R", "-vvv"])
+        self.assertEq("-u" in cmd, False)
+    def test_0370(self) -> None:
+        """ unmask removes the /dev/null symlink that masking put there """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        svc1 = "masked1.service"
+        os.symlink("/dev/null", F"{sysd}/{svc1}")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        self.assertEq(os.path.islink(F"{sysd}/{svc1}"), True)
+        systemctl.unmask_unit(svc1)
+        self.assertEq(os.path.exists(F"{sysd}/{svc1}"), False)
+        self.rm_testdir()
+    def test_0371(self) -> None:
+        """ unmask must not remove a symlink that is NOT a mask - a unit file may
+            well be a link to the real unit (an alias, or a packaging choice), and
+            deleting it uninstalls the service instead of unmasking it """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        real, link = "real1.service", "link1.service"
+        text_file(F"{sysd}/{real}", """
+        [Service]
+        ExecStart = /usr/bin/true""")
+        os.symlink(real, F"{sysd}/{link}")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl.unmask_unit(link)
+        self.assertEq(os.path.islink(F"{sysd}/{link}"), True)
+        self.assertEq(os.readlink(F"{sysd}/{link}"), real)
+        self.assertEq(os.path.isfile(F"{sysd}/{real}"), True)
+        self.rm_testdir()
+    def _list_unit_files_setup(self, tmp: str) -> "app.Systemctl":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        for name in ["zza.service", "zzb.service", "other.service"]:
+            text_file(F"{sysd}/{name}", """
+            [Service]
+            ExecStart = /usr/bin/true""")
+        os.symlink("/dev/null", F"{sysd}/zzmasked.service")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl._no_legend = True # pylint: disable=protected-access
+        return systemctl
+    def test_0380(self) -> None:
+        """ list-unit-files PATTERN filters the listing """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        names = [item[0] for item in systemctl.list_unit_files_modules("zz*")]
+        self.assertEq(sorted(names), ["zza.service", "zzb.service", "zzmasked.service"])
+        self.rm_testdir()
+    def test_0381(self) -> None:
+        """ every PATTERN counts, not just the first one """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        names = [item[0] for item in systemctl.list_unit_files_modules("zza*", "other*")]
+        self.assertEq(sorted(names), ["other.service", "zza.service"])
+        self.rm_testdir()
+    def test_0382(self) -> None:
+        """ --state=masked selects by the enablement state that is listed """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        systemctl._only_state = ["masked"] # pylint: disable=protected-access
+        names = [item[0] for item in systemctl.list_unit_files_modules()]
+        self.assertEq(names, ["zzmasked.service"])
+        self.rm_testdir()
+    def test_0383(self) -> None:
+        """ a PATTERN and --state= narrow together """
+        tmp = self.testdir()
+        systemctl = self._list_unit_files_setup(tmp)
+        systemctl._only_state = ["masked"] # pylint: disable=protected-access
+        self.assertEq([item[0] for item in systemctl.list_unit_files_modules("zza*")], [])
+        self.assertEq([item[0] for item in systemctl.list_unit_files_modules("zzm*")], ["zzmasked.service"])
+        self.rm_testdir()
+    def test_0390(self) -> None:
+        """ set-environment / get-environment round trip, and the file is kept under
+            the runtime directory of the root we were pointed at """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(systemctl.get_environment_modules("FOO"), "")
+        self.assertEq(systemctl.set_environment_modules("FOO=bar"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "bar")
+        self.assertEq(os.path.isfile(systemctl.get_environment_file()), True)
+        self.assertEq(systemctl.get_environment_file().startswith(tmp), True)
+        self.rm_testdir()
+    def test_0391(self) -> None:
+        """ a second setting joins the first, and unset removes only its own """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.set_environment_modules("FOO=bar")
+        systemctl.set_environment_modules("BAZ=qux")
+        self.assertEq(systemctl.get_environment_modules("FOO"), "bar")
+        self.assertEq(systemctl.get_environment_modules("BAZ"), "qux")
+        self.assertEq(systemctl.unset_environment_modules("FOO"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "")
+        self.assertEq(systemctl.get_environment_modules("BAZ"), "qux")
+        self.rm_testdir()
+    def test_0392(self) -> None:
+        """ a value may contain '=' itself, and bad input is refused instead of
+            being stored under a half name """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(systemctl.set_environment_modules("FOO=a=b=c"), 0)
+        self.assertEq(systemctl.get_environment_modules("FOO"), "a=b=c")
+        self.assertEq(systemctl.set_environment_modules("NOEQUALSIGN"), 2)
+        self.assertEq(systemctl.set_environment_modules(), 1)
+        self.assertEq(systemctl.get_environment_modules(), 1)
+        self.assertEq(systemctl.unset_environment_modules(), 1)
+        self.rm_testdir()
+    def test_0393(self) -> None:
+        """ unset of something never set is not an error, and reading a runtime
+            directory that does not exist yet answers empty rather than failing """
+        tmp = self.testdir()
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        self.assertEq(os.path.isfile(systemctl.get_environment_file()), False)
+        self.assertEq(systemctl.get_environment_modules("NEVERSET"), "")
+        self.assertEq(systemctl.unset_environment_modules("NEVERSET"), 0)
+        self.rm_testdir()
+    def _template_setup(self, tmp: str) -> "app.SystemctlUnitFiles":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/tmpl@.service", """
+        [Unit]
+        Description = template for %i
+        [Service]
+        ExecStart = /usr/bin/true %i""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit
+    def test_0400(self) -> None:
+        """ every instance of a template gets its own conf - they used to share the
+            template's object, so the name of the last one loaded won for all """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        self.assertEq(conf_b.name(), "tmpl@b.service")
+        self.assertEq(conf_a is conf_b, False)
+        self.rm_testdir()
+    def test_0401(self) -> None:
+        """ loading a second instance does not rename the first one """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        unit.load_conf("tmpl@b.service")
+        self.assertEq(conf_a.name(), "tmpl@a.service")
+        self.rm_testdir()
+    def test_0402(self) -> None:
+        """ %i expands per instance, and the bare template has no instance at all """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        self.assertEq(unit.get_Description(conf_a), "template for a")
+        self.assertEq(unit.get_Description(conf_b), "template for b")
+        conf_t = unit.load_conf("tmpl@.service")
+        self.assertEq(unit.get_Description(conf_t), "template for ")
+        self.rm_testdir()
+    def test_0403(self) -> None:
+        """ the state of one instance is not the state of another """
+        tmp = self.testdir()
+        unit = self._template_setup(tmp)
+        conf_a = unit.load_conf("tmpl@a.service")
+        conf_b = unit.load_conf("tmpl@b.service")
+        conf_a.status = {"ActiveState": "active"}
+        self.assertEq(conf_b.status, None)
+        self.assertEq(conf_a.status, {"ActiveState": "active"})
+        self.rm_testdir()
+    def _alias_setup(self, tmp: str) -> "app.SystemctlUnitFiles":
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/real1.service", """
+        [Unit]
+        Description = the real one
+        [Service]
+        ExecStart = /usr/bin/true""")
+        text_file(F"{sysd}/tmpl@.service", """
+        [Unit]
+        Description = template for %i
+        [Service]
+        ExecStart = /usr/bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit
+    def test_0410(self) -> None:
+        """ a unit file that is a symlink to another unit is an alias of it - asking
+            for either name answers about the one that is really there """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        os.symlink("real1.service", F"{tmp}/etc/systemd/system/alias1.service")
+        self.assertEq(unit.real_unit_name("alias1.service"), "real1.service")
+        conf = unit.load_conf("alias1.service")
+        self.assertEq(conf.name(), "real1.service")
+        self.assertEq(unit.get_Description(conf), "the real one")
+        self.rm_testdir()
+    def test_0411(self) -> None:
+        """ a name that is not a link is not an alias """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        self.assertEq(unit.real_unit_name("real1.service"), "real1.service")
+        self.rm_testdir()
+    def test_0412(self) -> None:
+        """ tmpl@one.service -> tmpl@.service is how an instance is enabled, not an
+            alias of the template - resolving it that way would hand every instance
+            the template's conf and its name """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        sysd = F"{tmp}/etc/systemd/system"
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@one.service")
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@two.service")
+        self.assertEq(unit.real_unit_name("tmpl@one.service"), "tmpl@one.service")
+        conf1 = unit.load_conf("tmpl@one.service")
+        conf2 = unit.load_conf("tmpl@two.service")
+        self.assertEq(conf1.name(), "tmpl@one.service")
+        self.assertEq(conf2.name(), "tmpl@two.service")
+        self.assertEq(unit.get_Description(conf1), "template for one")
+        self.assertEq(unit.get_Description(conf2), "template for two")
+        self.rm_testdir()
+    def test_0413(self) -> None:
+        """ a link onto a DIFFERENT template is a real alias, and systemd carries the
+            instance across it - other@one.service means tmpl@one.service """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        os.symlink("tmpl@.service", F"{tmp}/etc/systemd/system/other@one.service")
+        self.assertEq(unit.real_unit_name("other@one.service"), "tmpl@one.service")
+        conf = unit.load_conf("other@one.service")
+        self.assertEq(unit.get_Description(conf), "template for one")
+        self.rm_testdir()
+    def test_0414(self) -> None:
+        """ an instance link is read from the template it points at, so the drop-ins
+            of the template apply to the instance as well """
+        tmp = self.testdir()
+        unit = self._alias_setup(tmp)
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(F"{sysd}/tmpl@.service.d")
+        text_file(F"{sysd}/tmpl@.service.d/10-extra.conf", """
+        [Service]
+        Environment = FROMDROPIN=yes""")
+        os.symlink("tmpl@.service", F"{sysd}/tmpl@one.service")
+        conf = unit.load_conf("tmpl@one.service")
+        self.assertEq(conf.getlist("Service", "Environment", []), ["FROMDROPIN=yes"])
+        self.rm_testdir()
+    def _status_conf(self, tmp: str, unit: str = "zz1.service") -> Any: # type: ignore[explicit-any]
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/{unit}", """
+        [Service]
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf(unit)
+    def test_0420(self) -> None:
+        """ the status file must be readable whatever umask we were called with -
+            an unreadable one makes a running service look stopped """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        old = os.umask(0o077)
+        try:
+            systemctl.write_status_from(conf, MainPID=1234)
+        finally:
+            os.umask(old)
+        status_file = systemctl.get_status_file_from(conf)
+        mode = os.stat(status_file).st_mode & 0o777
+        self.assertEq(mode & 0o044, 0o044, F"mode is {mode:04o}")
+        self.rm_testdir()
+    def test_0421(self) -> None:
+        """ read bits are added, never taken away - a mode widened on purpose stays """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        systemctl.write_status_from(conf, MainPID=1234)
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o664)
+        systemctl.write_status_from(conf, MainPID=1235)
+        self.assertEq(os.stat(status_file).st_mode & 0o777, 0o664)
+        self.rm_testdir()
+    def test_0422(self) -> None:
+        """ the status file is our own state, never a symlink - writing through one
+            overwrites whatever it points at """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        status_file = systemctl.get_status_file_from(conf)
+        os.makedirs(os.path.dirname(status_file), exist_ok=True)
+        victim = F"{tmp}/victim.txt"
+        text_file(victim, "SECRET\n")
+        os.symlink(os.path.abspath(victim), status_file) # must be resolvable
+        self.assertEq(os.path.exists(status_file), True) # not a dangling link
+        systemctl.write_status_from(conf, MainPID=1234)
+        self.assertEq(open(victim).read(), "SECRET\n")
+        self.rm_testdir()
+    def test_0423(self) -> None:
+        """ a read-only command must not truncate a foreign file through a symlink
+            either - shutil_truncate runs from is-active and show """
+        tmp = self.testdir()
+        victim = F"{tmp}/victim.txt"
+        text_file(victim, "SECRET\n")
+        link = F"{tmp}/link.status"
+        os.symlink(os.path.abspath(victim), link)
+        self.assertEq(os.path.exists(link), True) # not a dangling link
+        try:
+            app.shutil_truncate(link)
+        except OSError:
+            pass
+        self.assertEq(open(victim).read(), "SECRET\n")
+        self.rm_testdir()
+    def test_0424(self) -> None:
+        """ a runtime directory of ours must be enterable whatever the umask was """
+        tmp = self.testdir()
+        folder = F"{tmp}/run/systemd"
+        old = os.umask(0o077)
+        try:
+            app.makedirs_mode(folder)
+        finally:
+            os.umask(old)
+        mode = os.stat(folder).st_mode & 0o777
+        self.assertEq(mode & 0o055, 0o055, F"mode is {mode:04o}")
+        app.makedirs_mode(folder) # again on an existing directory must not raise
+        self.rm_testdir()
+    def test_0430(self) -> None:
+        """ a status file we cannot read must not be reported as "not running" -
+            that is the opposite answer, not a missing one """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid(), AS="active")
+        self.assertEq(systemctl.get_active_from(conf), "active")
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        conf.status = None # forget what we cached from the readable file
+        self.assertEq(systemctl.get_active_from(conf), "unknown")
+        self.assertEq(systemctl.get_substate_from(conf), "unknown")
+        os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0431(self) -> None:
+        """ an absent status file is a real answer, not a failure """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        self.assertEq(systemctl.get_active_from(conf), "inactive")
+        self.assertEq(conf.state_unreadable, False)
+        self.rm_testdir()
+    def test_0432(self) -> None:
+        """ a fifo at the status path must not block us - open() on one waits for a
+            writer forever, which would hang is-active and, on PID 1, survive the
+            SIGTERM of a docker stop """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        status_file = systemctl.get_status_file_from(conf)
+        os.makedirs(os.path.dirname(status_file), exist_ok=True)
+        os.mkfifo(status_file)
+        self.assertEq(systemctl.get_active_from(conf), "unknown")
+        self.rm_testdir()
+    def test_0433(self) -> None:
+        """ is_readable_file tells "cannot read" apart from "is not there" """
+        tmp = self.testdir()
+        systemctl, _ = self._status_conf(tmp)
+        missing = F"{tmp}/nosuch.txt"
+        self.assertEq(systemctl.is_readable_file(missing), False)
+        present = F"{tmp}/present.txt"
+        text_file(present, "x\n")
+        self.assertEq(systemctl.is_readable_file(present), True)
+        os.chmod(present, 0o000)
+        conf = app.SystemctlConf(app.UnitConfParser(), "zz9.service")
+        self.assertEq(systemctl.is_readable_file(present, conf), False)
+        self.assertEq(conf.state_unreadable, True)
+        os.chmod(present, 0o644)
+        self.rm_testdir()
+    def test_0434(self) -> None:
+        """ a PIDFile is written by the application and may well be a symlink of its
+            own - unlike our status file, that one has to be followed """
+        tmp = self.testdir()
+        systemctl, _ = self._status_conf(tmp)
+        real = F"{tmp}/real.pid"
+        text_file(real, "4242\n")
+        link = F"{tmp}/link.pid"
+        os.symlink(os.path.abspath(real), link)
+        self.assertEq(systemctl.is_readable_file(link, None, ours=False), True)
+        self.assertEq(systemctl.read_pid_file(link), 4242)
+        self.assertEq(systemctl.is_readable_file(link, None, ours=True), False)
+        self.rm_testdir()
+    def _pidfile_unit(self, tmp: str) -> Any: # type: ignore[explicit-any]
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        os.makedirs(F"{tmp}/piddir")
+        text_file(F"{sysd}/zzp.service", """
+        [Service]
+        Type = forking
+        PIDFile = /piddir/zzp.pid
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzp.service")
+    def test_0444(self) -> None:
+        """ a PIDFile= we may not even stat does not by itself make the state
+            unknown - that file belongs to the application and may well sit behind
+            a directory we are not allowed to enter (exim4 keeps /run/exim4 at 0750).
+            When we never wrote a state for the unit, it was never started here, and
+            that is a complete answer: inactive, the same one root gets. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "inactive")
+            conf.status = None
+            self.assertEq(systemctl.get_substate_from(conf), "dead")
+        finally:
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.rm_testdir()
+    def test_0445(self) -> None:
+        """ and when we did write a state for it, that state is the answer - a
+            running service must not turn into "unknown" just because the pid file
+            the application keeps sits in a directory we may not enter """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid()) # a PID that is alive
+        conf.status = None
+        os.chmod(F"{tmp}/piddir", 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "active")
+            conf.status = None
+            self.assertEq(systemctl.get_substate_from(conf), "running")
+        finally:
+            os.chmod(F"{tmp}/piddir", 0o755)
+    def test_0440(self) -> None:
+        """ the state of a system unit is read from /run, where the system keeps it,
+            not from the private tree an unprivileged caller writes into """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        system_dir = F"{tmp}/run"
+        os.makedirs(system_dir, exist_ok=True)
+        text_file(F"{system_dir}/zz1.service.status", "MainPID=4242\n")
+        self.assertEq(systemctl.read_status_file_from(conf), F"{system_dir}/zz1.service.status")
+        self.rm_testdir()
+    def test_0441(self) -> None:
+        """ when nobody privileged keeps state in /run, this script is the manager
+            and its own tree is all there is """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        os.makedirs(F"{tmp}/run", exist_ok=True) # exists but holds no state
+        self.assertEq(systemctl.read_status_file_from(conf), systemctl.get_status_file_from(conf))
+        self.rm_testdir()
+    def test_0442(self) -> None:
+        """ writing is never redirected - an unprivileged caller must not be sent at
+            the system state, it writes into its own tree and fails there or not """
+        tmp = self.testdir()
+        systemctl, conf = self._status_conf(tmp)
+        os.makedirs(F"{tmp}/run", exist_ok=True)
+        text_file(F"{tmp}/run/zz1.service.status", "MainPID=4242\n")
+        written = systemctl.get_status_file_from(conf)
+        self.assertEq(written.endswith("zz1.service.status"), True)
+        self.assertEq(systemctl.read_status_file_from(conf), F"{tmp}/run/zz1.service.status")
+        self.rm_testdir()
+    def test_0443(self) -> None:
+        """ a unit that names its own StatusFile= means that path and nothing else """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zz2.service", """
+        [Service]
+        StatusFile = /var/lib/zz2.state
+        ExecStart = /usr/bin/true""")
+        os.makedirs(F"{tmp}/run", exist_ok=True)
+        text_file(F"{tmp}/run/zz2.state", "MainPID=4242\n")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        conf = systemctl.unitfiles.get_conf("zz2.service")
+        self.assertEq(systemctl.read_status_file_from(conf), F"{tmp}/var/lib/zz2.state")
+        self.rm_testdir()
+    def _nopidfile_unit(self, tmp: str) -> Any: # type: ignore[explicit-any]
+        """ a unit with no PIDFile= at all - there is nobody else to ask, so our own
+            state is the only source there is """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzq.service", """
+        [Service]
+        Type = simple
+        ExecStart = /usr/bin/true""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzq.service")
+    def test_0446(self) -> None:
+        """ unknown is kept for the case it was meant for: there is no PIDFile to
+            ask, and our OWN state is what we cannot read """
+        tmp = self.testdir()
+        systemctl, conf = self._nopidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid())
+        conf.status = None
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "unknown")
+        finally:
+            os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0448(self) -> None:
+        """ ... but when the unit does declare a PIDFile= and that file is absent,
+            the application has answered and we do not need our own state at all -
+            not even when we cannot read it """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        systemctl.write_status_from(conf, MainPID=os.getpid())
+        conf.status = None
+        status_file = systemctl.get_status_file_from(conf)
+        os.chmod(status_file, 0o000)
+        try:
+            self.assertEq(systemctl.get_active_from(conf), "inactive")
+        finally:
+            os.chmod(status_file, 0o644)
+        self.rm_testdir()
+    def test_0447(self) -> None:
+        """ a PIDFile that is simply ABSENT is a different answer from one we may
+            not read. Absent means the application says it is not running, and that
+            is complete - our own state must not override it, or a service that
+            ended by itself gets reported as failed. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        dead = os.fork()
+        if not dead:
+            os._exit(0) # pylint: disable=protected-access
+        os.waitpid(dead, 0)
+        systemctl.write_status_from(conf, MainPID=dead)
+        conf.status = None
+        self.assertEq(systemctl.get_active_from(conf), "inactive")
+        self.assertEq(systemctl.get_substate_from(conf), "dead")
+        self.rm_testdir()
+    def test_0490(self) -> None:
+        """ a PIDFile= we may not stat is the normal case for an unprivileged
+            caller - exim4 keeps /run/exim4 at 0750 - and we answer it correctly
+            from our own state. Saying so at WARNING on every single query buries
+            the warnings that do mean something. """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        logged = []
+        warning = app.logg.warning
+        app.logg.warning = lambda fmt, *a: logged.append(fmt % a) # type: ignore[method-assign,assignment]
+        try:
+            pid_file = F"{tmp}/piddir/zzp.pid"
+            self.assertFalse(systemctl.is_readable_file(pid_file, conf, ours=False))
+        finally:
+            app.logg.warning = warning # type: ignore[method-assign]
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.assertEqual(logged, [])
+        self.assertTrue(conf.state_unreadable) # still recorded, just not shouted
+        self.rm_testdir()
+    def test_0491(self) -> None:
+        """ ... but a file of our own that we may not stat is a real surprise and
+            keeps its warning """
+        tmp = self.testdir()
+        systemctl, conf = self._pidfile_unit(tmp)
+        os.chmod(F"{tmp}/piddir", 0o000)
+        logged = []
+        warning = app.logg.warning
+        app.logg.warning = lambda fmt, *a: logged.append(fmt % a) # type: ignore[method-assign,assignment]
+        try:
+            self.assertFalse(systemctl.is_readable_file(F"{tmp}/piddir/ours.state", conf))
+        finally:
+            app.logg.warning = warning # type: ignore[method-assign]
+            os.chmod(F"{tmp}/piddir", 0o755)
+        self.assertEqual(len(logged), 1)
+        self.assertTrue(logged[0].startswith("can not stat"))
+        self.rm_testdir()
+    KILLMODE_MAINPID = 11
+    KILLMODE_PIDLIST = [11, 22]
+    def _killmode_unit(self, tmp, killmode, dies = None, timeout = 4):
+        """ do_kill_unit_from is driven by pidlist_of() and pid_exists(), so a fake
+            process table is enough to observe which pids it signals and which ones
+            it waits for. 'dies' are the pids that react to the friendly signal, the
+            others only to SIGKILL. Returns (systemctl, conf, alive, killed). """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzk.service", F"""
+        [Service]
+        ExecStart = /usr/bin/true
+        KillMode = {killmode}
+        TimeoutStopSec = {timeout}""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        conf = systemctl.unitfiles.get_conf("zzk.service")
+        mainpid, pidlist = self.KILLMODE_MAINPID, self.KILLMODE_PIDLIST
+        systemctl.write_status_from(conf, MainPID=mainpid)
+        alive = set(pidlist)
+        obedient = set([mainpid] if dies is None else dies)
+        killed = []
+        def kill_pid(pid, kill_signal = None):
+            killed.append((pid, kill_signal))
+            if pid in obedient or kill_signal == signal.SIGKILL:
+                alive.discard(pid)
+            return pid not in alive
+        systemctl.pidlist_of = lambda pid: list(pidlist) # type: ignore[method-assign]
+        systemctl._kill_pid = kill_pid # type: ignore[method-assign] # pylint: disable=protected-access
+        return systemctl, conf, alive, killed
+    def _fake_pids(self, alive):
+        """ patches the module-wide process lookups against a fake process table """
+        pid_exists, pid_zombie = app.pid_exists, app.pid_zombie
+        app.pid_exists = lambda pid: pid in alive
+        app.pid_zombie = lambda pid: False
+        return pid_exists, pid_zombie
+    def _real_pids(self, saved):
+        app.pid_exists, app.pid_zombie = saved
+    def test_0450(self) -> None:
+        """ KillMode=control-group - all remaining processes of the unit are killed """
+        self.assertEqual(app.killmode_pidlist("control-group", 11, [11, 22, 33]), [11, 22, 33])
+        self.assertEqual(app.killmode_pidlist("control-group", 11, [11, 22, 33], sigkill=True), [11, 22, 33])
+    def test_0451(self) -> None:
+        """ KillMode=process - only the main process itself is killed, and the later
+            SIGKILL does not widen that (systemd.kill(5)) """
+        self.assertEqual(app.killmode_pidlist("process", 11, [11, 22, 33]), [11])
+        self.assertEqual(app.killmode_pidlist("process", 11, [11, 22, 33], sigkill=True), [11])
+    def test_0452(self) -> None:
+        """ KillMode=mixed - SIGTERM goes to the main process while the subsequent
+            SIGKILL is sent to all remaining processes (systemd.kill(5)) """
+        self.assertEqual(app.killmode_pidlist("mixed", 11, [11, 22, 33]), [11])
+        self.assertEqual(app.killmode_pidlist("mixed", 11, [11, 22, 33], sigkill=True), [11, 22, 33])
+    def test_0453(self) -> None:
+        """ KillMode=none - no process is killed, only the stop command is executed """
+        self.assertEqual(app.killmode_pidlist("none", 11, [11, 22, 33]), [])
+        self.assertEqual(app.killmode_pidlist("none", 11, [11, 22, 33], sigkill=True), [])
+    def test_0454(self) -> None:
+        """ KillMode=process must not wait for processes it never signalled. Debian
+            ships ssh.service, cron.service and puppet.service that way so that the
+            established sessions survive - waiting for them burns TimeoutStopSec on
+            every shutdown and the container ends up being SIGKILLed from outside. """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "process")
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM)])
+        self.assertEqual(alive, set([22])) # the session process is left alone
+        self.assertTrue(done)
+        self.assertLess(lapse, 2) # not TimeoutStopSec=4
+        self.rm_testdir()
+    def test_0455(self) -> None:
+        """ KillMode=none kills nothing at all - not even the main process """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "none")
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [])
+        self.assertEqual(alive, set([11, 22]))
+        self.assertTrue(done)
+        self.assertLess(lapse, 2)
+        self.rm_testdir()
+    def test_0456(self) -> None:
+        """ KillMode=control-group stays as it was - every process of the unit gets
+            the kill signal """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "control-group", dies=[11, 22])
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (22, signal.SIGTERM)])
+        self.assertEqual(alive, set())
+        self.assertTrue(done)
+        self.assertLess(lapse, 2)
+        self.rm_testdir()
+    def test_0458(self) -> None:
+        """ KillMode=control-group does wait for the other processes as well, and it
+            escalates to SIGKILL for the ones that did not react """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "control-group", timeout=1)
+        saved = self._fake_pids(alive)
+        try:
+            started = time.monotonic()
+            done = systemctl.do_kill_unit_from(conf)
+            lapse = time.monotonic() - started
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (22, signal.SIGTERM), (22, signal.SIGKILL)])
+        self.assertTrue(done)
+        self.assertGreaterEqual(lapse, 1) # it did wait for TimeoutStopSec
+        self.rm_testdir()
+    def test_0457(self) -> None:
+        """ SendSIGHUP follows the KillMode set, not the whole process list - systemd
+            sends it right after the kill signal, to the same processes """
+        tmp = self.testdir()
+        systemctl, conf, alive, killed = self._killmode_unit(tmp, "process")
+        conf.set("Service", "SendSIGHUP", "yes")
+        saved = self._fake_pids(alive)
+        try:
+            systemctl.do_kill_unit_from(conf)
+        finally:
+            self._real_pids(saved)
+        self.assertEqual(killed, [(11, signal.SIGTERM), (11, signal.SIGHUP)])
+        self.rm_testdir()
+    def test_0460(self) -> None:
+        """ having no unit waiting for a restart is the healthy state of the init
+            loop, not an error. restart_failed_units() runs on every tick, so the
+            flag it raised here made the manager exit 1 after a clean shutdown. """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzr.service", """
+        [Service]
+        ExecStart = /usr/bin/true
+        Restart = no""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        done = systemctl.restart_failed_units(["zzr.service"])
+        self.assertEqual(done, [])
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        self.rm_testdir()
+    def test_0461(self) -> None:
+        """ ... and it stays that way over the repeated ticks of the init loop """
+        tmp = self.testdir()
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzr.service", """
+        [Service]
+        ExecStart = /usr/bin/true
+        Restart = no""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        for _ in range(3):
+            systemctl.restart_failed_units(["zzr.service"])
+        self.assertEqual(systemctl.error, app.NOT_A_PROBLEM)
+        self.rm_testdir()
+    def _enable_now(self, tmp, execstart):
+        """ a unit that gets enabled and started in one go (systemctl enable --now) """
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzn.service", F"""
+        [Service]
+        Type = oneshot
+        ExecStart = {execstart}
+        [Install]
+        WantedBy = multi-user.target""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        systemctl._now = 1 # pylint: disable=protected-access
+        return systemctl
+    def test_0470(self) -> None:
+        """ enable --now reports a start that failed. The start is half of what
+            --now promises, so swallowing its result makes the command claim it
+            did something it did not do. """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/false")
+        self.assertFalse(systemctl.enable_units(["zzn.service"]))
+        wants = F"{tmp}/etc/systemd/system/multi-user.target.wants/zzn.service"
+        # islink, not exists - with a relative --root the wants-link is written
+        # with a relative target and does not resolve. That is a different bug.
+        self.assertTrue(os.path.islink(wants)) # the enable half did happen
+        self.rm_testdir()
+    def test_0471(self) -> None:
+        """ ... and a start that worked is still a success """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/true")
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        self.rm_testdir()
+    def test_0472(self) -> None:
+        """ disable --now reports a stop that failed the same way """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/true")
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        systemctl.stop_unit = lambda unit: False # type: ignore[method-assign]
+        self.assertFalse(systemctl.disable_units(["zzn.service"]))
+        self.rm_testdir()
+    def test_0473(self) -> None:
+        """ without --now the start is not attempted at all and cannot fail """
+        tmp = self.testdir()
+        systemctl = self._enable_now(tmp, "/bin/false")
+        systemctl._now = 0 # pylint: disable=protected-access
+        self.assertTrue(systemctl.enable_units(["zzn.service"]))
+        self.rm_testdir()
+    def test_0480(self) -> None:
+        """ /sbin/halt and friends are symlinks to systemctl, and systemd dispatches
+            on the name it was invoked as. Without that, running as 'reboot' printed
+            a unit listing and returned success. """
+        for name in ["halt", "poweroff", "reboot", "shutdown", "telinit", "runlevel"]:
+            self.assertEqual(app.command_of_prog(F"/sbin/{name}"), name)
+            self.assertEqual(app.command_of_prog(name), name)
+        self.rm_testdir()
+    def test_0481(self) -> None:
+        """ ... and the names we are normally installed under mean no such command """
+        for name in ["/usr/bin/systemctl", "/bin/systemctl.docker", "systemctl",
+                     "files/docker/systemctl3.py", "/sbin/init", "/sbin/rebooted"]:
+            self.assertEqual(app.command_of_prog(name), "")
+        self.rm_testdir()
+    def _no_pid1_signal(self):
+        """ halt/poweroff/reboot end with a SIGQUIT to PID 1 to leave the init loop.
+            Record that signal instead of sending it - this test suite runs inside
+            a container whose PID 1 we must not touch. """
+        sent = []
+        real_kill = os.kill
+        os.kill = lambda pid, sig: sent.append((pid, sig)) # type: ignore[assignment]
+        return sent, real_kill
+    def test_0482(self) -> None:
+        """ systemctl(1) documents reboot and poweroff next to halt; we only had
+            halt, so 'systemctl reboot' was an unknown operation. In a container
+            all three mean the same thing: stop the units and end the init loop,
+            after which the supervisor decides what happens next. """
+        tmp = self.testdir()
+        os.makedirs(F"{tmp}/etc/systemd/system")
+        for verb in ["halt", "poweroff", "reboot"]:
+            systemctl = app.Systemctl()
+            systemctl._root = tmp # pylint: disable=protected-access
+            systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+            sent, real_kill = self._no_pid1_signal()
+            try:
+                getattr(systemctl, verb + "_target")()
+            finally:
+                os.kill = real_kill # type: ignore[assignment]
+            self.assertEqual(sent, [(1, signal.SIGQUIT)], verb)
+        self.rm_testdir()
+    def test_0483(self) -> None:
+        """ ... and the three are reachable as commands, which is what the /sbin
+            symlinks end up calling """
+        tmp = self.testdir()
+        os.makedirs(F"{tmp}/etc/systemd/system")
+        root = app._root # pylint: disable=protected-access
+        app._root = tmp # pylint: disable=protected-access
+        try:
+            for verb in ["halt", "poweroff", "reboot"]:
+                sent, real_kill = self._no_pid1_signal()
+                try:
+                    app.runcommand(verb)
+                finally:
+                    os.kill = real_kill # type: ignore[assignment]
+                # the signal is the proof the command was dispatched and ran;
+                # its exit code is a separate matter (stop_system_default reports
+                # failure when there was nothing running to stop)
+                self.assertEqual(sent, [(1, signal.SIGQUIT)], verb)
+        finally:
+            app._root = root # pylint: disable=protected-access
+        self.rm_testdir()
+    def _scan_units(self, tmp):
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zza.service", """
+        [Unit]
+        Description = the first description
+        [Service]
+        ExecStart = /bin/true""")
+        text_file(F"{sysd}/zzb.service", """
+        [Unit]
+        Description = about to be removed
+        [Service]
+        ExecStart = /bin/true""")
+        unit = app.SystemctlUnitFiles()
+        unit._root = tmp # pylint: disable=protected-access
+        return unit, sysd
+    def test_0500(self) -> None:
+        """ scan_unit_files(reload=True) is what a daemon-reload is made of, and
+            systemctl(1) says that rereads the unit files and recreates the tree.
+            It only ever added to what it had, so a unit whose file is gone stayed
+            listed for the life of the manager. """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        self.assertEqual(sorted(n for n in unit.scan_unit_files() if n.startswith("zz")),
+                         ["zza.service", "zzb.service"])
+        os.remove(F"{sysd}/zzb.service")
+        self.assertEqual(sorted(n for n in unit.scan_unit_files(reload=True) if n.startswith("zz")),
+                         ["zza.service"])
+        self.rm_testdir()
+    def test_0501(self) -> None:
+        """ ... and a unit file that changed is read again, not served from the
+            conf it was parsed into the first time """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        unit.scan_unit_files()
+        self.assertEqual(unit.get_Description(unit.get_conf("zza.service")), "the first description")
+        text_file(F"{sysd}/zza.service", """
+        [Unit]
+        Description = the second description
+        [Service]
+        ExecStart = /bin/true""")
+        unit.scan_unit_files(reload=True)
+        self.assertEqual(unit.get_Description(unit.get_conf("zza.service")), "the second description")
+        self.rm_testdir()
+    def test_0502(self) -> None:
+        """ ... and without reload nothing is rescanned at all, which is the
+            other half of the contract: systemd reads the disk on daemon-reload
+            and not on every question asked of it """
+        tmp = self.testdir()
+        unit, sysd = self._scan_units(tmp)
+        unit.scan_unit_files()
+        os.remove(F"{sysd}/zzb.service")
+        self.assertIn("zzb.service", unit.scan_unit_files())
+        self.rm_testdir()
+    def _dirmode_unit(self, tmp, extra = ""):
+        sysd = F"{tmp}/etc/systemd/system"
+        os.makedirs(sysd)
+        text_file(F"{sysd}/zzd.service", F"""
+        [Service]
+        ExecStart = /usr/bin/true
+        RuntimeDirectory = foo/run
+        StateDirectory = foo/state
+        CacheDirectory = foo/cache
+        LogsDirectory = foo/logs
+        ConfigurationDirectory = foo/config
+        {extra}""")
+        systemctl = app.Systemctl()
+        systemctl._root = tmp # pylint: disable=protected-access
+        systemctl.unitfiles._root = tmp # pylint: disable=protected-access
+        return systemctl, systemctl.unitfiles.get_conf("zzd.service")
+    def _made_dirs(self, systemctl, conf, tmp, umask):
+        was = os.umask(umask)
+        try:
+            envs = systemctl.create_service_directories(conf)
+        finally:
+            os.umask(was)
+        return {name: os.stat(app.os_path(tmp, path)).st_mode & 0o777
+                for name, path in envs.items() if name.endswith("_DIRECTORY")}
+    def test_0510(self) -> None:
+        """ systemd.exec(5) says the directory modes "default to 0755". Ours were
+            created with whatever the caller's umask happened to allow - which is
+            0755 under the common umask 022 and is not under any other. A container
+            running with umask 007 got 0770 for every one of them. """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp)
+        modes = self._made_dirs(systemctl, conf, tmp, 0o007)
+        for name in sorted(modes):
+            self.assertEqual(oct(modes[name]), oct(0o755), name)
+        self.rm_testdir()
+    def test_0511(self) -> None:
+        """ ... and the same under a umask that would have hidden the bug """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp)
+        modes = self._made_dirs(systemctl, conf, tmp, 0o022)
+        for name in sorted(modes):
+            self.assertEqual(oct(modes[name]), oct(0o755), name)
+        self.rm_testdir()
+    def test_0512(self) -> None:
+        """ ... while a mode the unit does ask for is still the one it gets """
+        tmp = self.testdir()
+        systemctl, conf = self._dirmode_unit(tmp, "StateDirectoryMode = 0700")
+        modes = self._made_dirs(systemctl, conf, tmp, 0o007)
+        self.assertEqual(oct(modes["STATE_DIRECTORY"]), oct(0o700))
+        self.assertEqual(oct(modes["CACHE_DIRECTORY"]), oct(0o755))
+        self.rm_testdir()
     def test_0310(self) -> None:
         tmp = self.testdir()
         svc1 = "test1.service"
@@ -1143,7 +2233,7 @@ if __name__ == "__main__":
     if opt.xmlresults:
         if os.path.exists(opt.xmlresults):
             os.remove(opt.xmlresults)
-        xmlresults = open(opt.xmlresults, "w")
+        xmlresults = open(opt.xmlresults, "wb")
         logg.info("xml results into %s", opt.xmlresults)
     if not logfile:
         if xmlresults:
