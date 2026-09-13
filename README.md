@@ -6,82 +6,66 @@
 # This fork
 
 A fork of [gdraheim/docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement),
-rebased onto upstream v1.7.1311. Everything below this section is the
+rebased onto upstream v1.7.1311. Everything from the next heading down is the
 upstream README and describes the upstream project.
 
-The work here sits on its own topic branches so that any of it can be
-taken one piece at a time; `master` is their merge. Each branch carries a
-test that fails without it. Numbers below are measured, not estimated.
+Take this fork if you run `systemctl3.py` as PID 1 in a container and have
+run into any of these.
 
-**Answers that were wrong**
+**Shutting down**
 
-* an unreadable `PIDFile=` no longer makes the state `unknown` - an
-  unprivileged caller gets the same answer as root. An *absent* PIDFile
-  still means `inactive`: the application has spoken and that is complete
-* a template instance gets its own conf instead of sharing the template's,
-  so every instance but the last stopped losing its recorded state
-* an enabled instance link is read as an instance, not as an alias
-* `enable --now` and `disable --now` report a start or stop that failed
-  instead of returning success
-* a clean shutdown of the init loop exits 0, not 1
-* `systemctl show -p path` on a unit with no file reports an empty path
+* stopping a unit waits for processes it never signalled, so a stop of `ssh`,
+  `cron` or `puppet` - which ship `KillMode=process` - burns the whole
+  `TimeoutStopSec` and ends in SIGKILL from outside. Around 31s to around 1s
+  on our containers
+* a SIGTERM arriving while the units are still starting is lost: the handlers
+  went up after the units, and PID 1 only ever receives what it has a handler
+  for
+* a shutdown request never ends the init loop, because it waits for the
+  machine to run out of processes - which a container running journald or
+  holding one login shell never does. The services go down, PID 1 stays up,
+  and the restart policy never fires
+* an `ExecStop=` that hangs outlives its `TimeoutStopSec=` and leaves the
+  service running
+* `reboot`, `halt`, `poweroff`, `shutdown` and `telinit` print a unit listing
+  and return success instead of doing anything
 
-**Shutdown and signals**
+**Wrong answers**
 
-* `KillMode=` decides who is signalled *and* who is waited for. Waiting on
-  processes it never touched made every stop of an `ssh`, `cron` or
-  `puppet` unit burn its whole `TimeoutStopSec`: measured 30.9s -> 1.0s
-* a shutdown request can end the init loop. It used to switch to waiting
-  for the machine to run out of processes, which a container running
-  journald or holding one login shell never does - the units went down,
-  PID 1 stayed up and the restart policy never fired
-* the signal handlers go up before the units are started, not after. As
-  PID 1 that is not a late handler but no handler at all: measured on a
-  container, an 8.75s window in which eight SIGTERMs vanished without a
-  trace. Now zero
-* a fork child leaves by `os._exit` and cannot unwind into the manager's
-  frames, whatever happens - including an exception before the exec
-* an `ExecStop=` that hangs no longer holds the stop open: 32.7s against
-  `TimeoutStopSec=2`, now 4.0s, and the service is actually gone
-* `/sbin/{reboot,halt,poweroff,shutdown,telinit}` dispatch on `argv[0]`
-  the way systemd does. Typing `reboot` used to print a unit listing and
-  return success. `reboot` and `poweroff` exist as commands now
+* an unprivileged caller sees `inactive` or `unknown` where root sees
+  `active`, and gets a warning on every query
+* template instances share one config, so every instance but the last loses
+  its recorded state
+* `enable --now` reports success when the start failed
+* a clean shutdown of the init loop exits 1
+* `journalctl` for a unit that logged nothing fails instead of answering
+* runtime files and `*DirectoryMode=` directories follow the caller's umask
+  rather than their documented defaults
 
-**Files, permissions and noise**
-
-* our runtime files do not depend on the caller's umask, and the five
-  `*DirectoryMode=` settings default to 0755 as `systemd.exec(5)` says
-* a `PIDFile=` we may not stat is the normal case for an unprivileged
-  caller, not a warning on every query
-* `journalctl` for a unit that logged nothing answers `-- No entries --`
-  with exit 0, matching the real journalctl byte for byte, instead of
-  failing and burying the error it was being asked to fetch
-* the `mount*` ignore pattern, lost upstream in `0b02699b` when the ignore
-  lists were rewritten
-
-**Additions**
+**Added**
 
 * `PermissionsStartOnly=` and the `+` prefix on `Exec*` lines
 * `[get|set|unset]-environment`
-* `journalctl --since` accepted and ignored, the way deployment tooling
+* `journalctl --since`, accepted and ignored the way deployment tooling
   passes it
-* `list-unit-files` honours its state filter, its mask filter and every
-  PATTERN given
-* `unmask` keeps a unit file that is a symlink to something other than
+* `list-unit-files` honouring its state filter, its mask filter and every
+  PATTERN
+* `unmask` keeping a unit file that is a symlink to something other than
   `/dev/null`
-* service aliases resolved consistently
 
-**Checks**
+**Not changed**
 
-`make lint`, `make testlocal` and `make type` are green here - see the
-badges above. `make testlocal` is `tests/functests.py`: 129 in-process
-tests in about five seconds, 73 of them added by this fork.
+The licence (EUPL-1.2), the package name, the version string and the command
+line interface. This fork is not published to PyPI - the badge above is
+upstream's release - and a deployed copy answers `--version` exactly as
+upstream does, so tell the two apart by the file and not by the version.
+It is not endorsed by upstream.
 
-`make exectests` is the heavy one - 371 subprocess tests, no docker
-needed, around half an hour. The wide check used while this work was
-done covers 254 of those (`test_1*`, `test_2*`, `test_3*`) and reports
-no failures. `tests/docktests.py` and `tests/buildtests.py` need docker
-and have not been run here.
+Each change sits on its own topic branch, most of them carrying a test that
+fails without it, so they can be taken one at a time. `make lint`, `make type`
+and `make testlocal` pass - see the badges. `make exectests` is 371 subprocess
+tests needing no docker, about twenty minutes; the check used here covers 254
+of them and reports no failures.
 
 # docker systemctl replacement
 
