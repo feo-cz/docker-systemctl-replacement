@@ -687,7 +687,7 @@ class AppUnitTest(unittest.TestCase):
         self.assertEqual(have, want)
         have = app.time_to_seconds("111 m", 7777)
         logg.info("have %s", have)
-        self.assertEqual(have, 111) # TODO
+        self.assertEqual(have, 6660) # systemd.time(7): a unit may follow after a space
         have = app.time_to_seconds("9999 m", 7777)
         logg.info("have %s", have)
         self.assertEqual(have, 7777)
@@ -2261,6 +2261,57 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(app.kill_whom_pidlist("all", None, []), [])
         self.assertEq(app.kill_whom_pidlist("bogus", 100, pidlist), None)
         self.assertEq(app.kill_whom_pidlist("Main", 100, pidlist), None)
+    def test_0540(self) -> None:
+        """ systemd.time(7) time spans may carry a decimal fraction and a unit may
+            follow after a space. systemd.service(5) takes RestartSec= 'in seconds'
+            unit-less, and parse_time() adds the digits after the dot as fractions. """
+        self.assertEq(app.time_to_seconds("0.1", 200), 0.1)
+        self.assertEq(app.time_to_seconds("0.5", 200), 0.5)
+        self.assertEq(app.time_to_seconds("2.0", 200), 2.0)
+        self.assertEq(app.time_to_seconds("1.5s", 200), 1.5)
+        self.assertEq(app.time_to_seconds("1.5 s", 200), 1.5)
+        self.assertEq(app.time_to_seconds("2.5min", 200), 150)
+        self.assertEq(app.time_to_seconds("0.25ms", 200), 0.00025)
+        self.assertEq(app.time_to_seconds("111 m", 7777), 6660)
+    def test_0541(self) -> None:
+        """ systemd.time(7) lists '55s500ms' and '300ms20s 5day' as valid time
+            spans: units follow each other with or without a space in between, and
+            every one of its unit names counts, not only s, m, min and ms """
+        self.assertEq(app.time_to_seconds("55s500ms", 200), 55.5)
+        self.assertEq(app.time_to_seconds("1min 30s", 200), 90)
+        self.assertEq(app.time_to_seconds("1m30s", 200), 90)
+        self.assertEq(app.time_to_seconds("2 min 5 sec", 200), 125)
+        self.assertEq(app.time_to_seconds("1h", 7777), 3600)
+        self.assertEq(app.time_to_seconds("2hours", 9999), 7200)
+        self.assertEq(app.time_to_seconds("1 hour", 7777), 3600)
+        self.assertEq(app.time_to_seconds("1d", 99999), 86400)
+        self.assertEq(app.time_to_seconds("1w", 999999), 604800)
+        self.assertEq(app.time_to_seconds("300ms20s 5day", 999999), 432020.3)
+        self.assertEq(app.time_to_seconds("100msec", 200), 0.1)
+        self.assertEq(app.time_to_seconds("2seconds", 200), 2)
+    def test_0542(self) -> None:
+        """ a service without RestartSec= waits the documented default before it is
+            restarted - systemd.service(5): 'Defaults to 100ms' - and not the
+            maximum of all timeouts """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9
+        Restart=on-failure""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        self.assertEq(unit.get_RestartSec(conf), 0.1)
+        self.rm_testdir()
+    def test_0543(self) -> None:
+        """ infinity stays the maximum on purpose: a container has no use for a
+            wait that never ends, so 'TimeoutSec=infinity' is capped like any other
+            long timeout instead of becoming float('inf') """
+        self.assertEq(app.time_to_seconds("infinity", 200), 200)
+        self.assertEq(app.time_to_seconds(" infinity ", 200), 200)
+        self.assertEq(app.time_to_seconds("10min", 200), 200)
+        self.assertEq(app.time_to_seconds("900", 200), 200)
 
 if __name__ == "__main__":
     # unittest.main()
