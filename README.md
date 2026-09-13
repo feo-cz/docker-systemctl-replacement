@@ -74,8 +74,14 @@ test that fails without it. Numbers below are measured, not estimated.
 **Checks**
 
 `make lint`, `make testlocal` and `make type` are green here - see the
-badges above. The heavy suite is `make exectests`: 254 tests, no
-failures. `make testlocal` is 129 in-process tests in about five seconds.
+badges above. `make testlocal` is `tests/functests.py`: 129 in-process
+tests in about five seconds, 73 of them added by this fork.
+
+`make exectests` is the heavy one - 371 subprocess tests, no docker
+needed, around half an hour. The wide check used while this work was
+done covers 254 of those (`test_1*`, `test_2*`, `test_3*`) and reports
+no failures. `tests/docktests.py` and `tests/buildtests.py` need docker
+and have not been run here.
 
 # docker systemctl replacement
 
