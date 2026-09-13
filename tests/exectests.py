@@ -21171,6 +21171,153 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_4180_systemctl_kill_sends_the_signal_it_is_given(self) -> None:
+        """ systemctl kill -s SIG --kill-whom=WHOM sends that signal to those
+            processes once, as systemctl(1) says - it does not stop the unit.
+            logrotate calls 'kill -s HUP --kill-whom=main rsyslog.service'."""
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        user = self.user()
+        root = self.root(testdir)
+        quick = QUICK
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("testsleep")
+        testsleepB = testsleep+"B"
+        testsleepC = testsleep+"C"
+        testscriptB = self.testname("testscriptB.sh")
+        logfile = os_path(root, "/var/log/test.log")
+        bindir = os_path(root, "/usr/bin")
+        begin = "{"
+        ends = "}"
+        text_file(logfile, "")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testscriptB}
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        shell_file(os_path(bindir, testscriptB), """
+            #! /bin/sh
+            date +%T,enter > {logfile}
+            sighup () {begin}
+              date +%T,sighup >> {logfile}
+            {ends}
+            sigterm () {begin}
+              date +%T,sigterm >> {logfile}
+              killall {testsleepC}
+              exit 0
+            {ends}
+            trap "sighup" 1     # SIGHUP
+            trap "sigterm" 15   # SIGTERM
+            {bindir}/{testsleepC} 999 >> {logfile} 2>&1 &
+            while true; do
+               {bindir}/{testsleepB} 1 >> {logfile} 2>&1 &
+               wait $!
+            done
+        """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleepB))
+        copy_tool(_bin_sleep, os_path(bindir, testsleepC))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testscriptB))
+        self.assertTrue(greps(top, testsleepC))
+        mainpid = output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip()
+        self.assertTrue(greps(mainpid, "^MainPID=[1-9]"))
+        #
+        cmd = "{systemctl} kill -s HUP --kill-whom=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        log = lines(reads(logfile))
+        self.assertEqual(len(greps(log, "sighup")), 1)
+        top = _recent(output(_top_list))
+        self.assertTrue(greps(top, testsleepC)) # main only
+        #
+        cmd = "{systemctl} kill -s SIGHUP --kill-who=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        log = lines(reads(logfile))
+        self.assertEqual(len(greps(log, "sighup")), 2)
+        top = _recent(output(_top_list))
+        self.assertTrue(greps(top, testsleepC)) # main only
+        #
+        cmd = "{systemctl} kill -s 1 zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        log = lines(reads(logfile))
+        logg.info("LOG %s\n| %s", logfile, "\n| ".join(log))
+        self.assertEqual(len(greps(log, "sighup")), 3)
+        self.assertFalse(greps(log, "sigterm")) # a signal, not a stop
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testscriptB))
+        self.assertFalse(greps(top, testsleepC)) # all is the children too
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        self.assertEqual(out.strip(), "active")
+        self.assertEqual(output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip(), mainpid)
+        #
+        cmd = "{systemctl} kill -s HUP --kill-whom=control zzb.service"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 1)
+        self.assertTrue(greps(err, "No control process to kill"))
+        #
+        cmd = "{systemctl} kill -s HUP --kill-whom=bogus zzb.service"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 1)
+        self.assertTrue(greps(err, "Invalid whom argument: bogus"))
+        #
+        cmd = "{systemctl} kill -s BOGUS zzb.service"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 1)
+        self.assertTrue(greps(err, 'Failed to parse signal string "BOGUS"'))
+        #
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        self.assertEqual(out.strip(), "active")
+        #
+        cmd = "{systemctl} stop zzb.service -vv {quick}"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        log = lines(reads(logfile))
+        self.assertTrue(greps(log, "sigterm"))
+        #
+        cmd = "{systemctl} kill -s HUP --kill-whom=main zzb.service"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 1)
+        self.assertTrue(greps(err, "No main process to kill"))
+        #
+        cmd = "{systemctl} kill -s HUP zzb.service"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0) # nothing to signal is no error for all
+        #
+        sx____("{systemctl} __killall {testsleepB}".format(**locals()))
+        sx____("{systemctl} __killall {testsleepC}".format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def test_4201_systemctl_py_dependencies_plain_start_order(self) -> None:
         """ check list-dependencies - standard order of starting
             units is simply the command line order"""
