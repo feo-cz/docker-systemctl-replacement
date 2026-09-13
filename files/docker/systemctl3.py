@@ -1182,7 +1182,72 @@ def parse_unit(fullname: str) -> SystemctlUnitName: # -> object(prefix, instance
         component = prefix[has_component+1:]
     return SystemctlUnitName(fullname, name, prefix, instance, suffix, component)
 
+# systemd time-util.c extract_multiplier(): the unit names of a time span in microseconds,
+# in the same order, since the first one that the text starts with is the one taken
+TimeSpanUnits: List[Tuple[str, int]] = [
+    ("seconds", 1000000), ("second", 1000000), ("sec", 1000000), ("s", 1000000),
+    ("minutes", 60000000), ("minute", 60000000), ("min", 60000000),
+    ("months", 2629800000000), ("month", 2629800000000), ("M", 2629800000000),
+    ("msec", 1000), ("ms", 1000), ("m", 60000000),
+    ("hours", 3600000000), ("hour", 3600000000), ("hr", 3600000000), ("h", 3600000000),
+    ("days", 86400000000), ("day", 86400000000), ("d", 86400000000),
+    ("weeks", 604800000000), ("week", 604800000000), ("w", 604800000000),
+    ("years", 31557600000000), ("year", 31557600000000), ("y", 31557600000000),
+    ("usec", 1), ("us", 1), ("\u03bcs", 1), ("\u00b5s", 1)]
+def time_span_usec(text: str) -> Optional[int]:
+    """ a time span read the way systemd's parse_time() reads it with seconds as the
+        default unit (systemd.time(7)): numbers with an optional decimal fraction, each
+        with an optional unit after it, one after the other with or without spaces -
+        "0.5", "1.5 s", "55s500ms". Microseconds, or None if the text is not one. """
+    digits = "0123456789"
+    pos, end, usec, something = 0, len(text), 0, False
+    while True:
+        while pos < end and text[pos].isspace():
+            pos += 1
+        if pos >= end:
+            break
+        start = pos
+        while pos < end and text[pos] in digits:
+            pos += 1
+        if pos == start:
+            return None
+        whole = int(text[start:pos])
+        fraction = ""
+        if pos < end and text[pos] == ".":
+            pos += 1
+            fraction_start = pos
+            while pos < end and text[pos] in digits:
+                pos += 1
+            fraction = text[fraction_start:pos]
+            if not fraction:
+                return None # "3." or "3.sec"
+        number_end = pos
+        while pos < end and text[pos].isspace():
+            pos += 1
+        multiplier = 1000000
+        for suffix, value in TimeSpanUnits:
+            if text.startswith(suffix, pos):
+                multiplier = value
+                pos += len(suffix)
+                break
+        else:
+            if pos == number_end and pos < end:
+                return None # "12.34.56" or "5x"
+        usec += whole * multiplier
+        scale = multiplier // 10
+        for digit in fraction:
+            usec += int(digit) * scale
+            scale //= 10
+        something = True
+    return usec if something else None
 def time_to_seconds(text: str, maximum: float) -> float:
+    usec = time_span_usec(str(text))
+    if usec: # a zero span keeps its old answer below, "0" is 0 and "0s" is 1
+        seconds = usec / 1000000.
+        if seconds > maximum:
+            logg.debug("time span %s capped to the maximum of %ss", text, maximum)
+            return maximum
+        return seconds
     value = 0.
     for part in str(text).split(" "):
         item = part.strip()
@@ -1229,6 +1294,7 @@ def time_to_seconds(text: str, maximum: float) -> float:
             except ValueError:
                 value += (pow(10, len(val)) -1)
     if value > maximum:
+        logg.debug("time span %s capped to the maximum of %ss", text, maximum)
         return maximum
     if not value and text.strip() == "0":
         return 0.
