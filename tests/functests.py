@@ -1121,8 +1121,8 @@ class AppUnitTest(unittest.TestCase):
 
     def test_0520(self) -> None:
         """ systemctl(1): 'show' without an argument shows the properties of the
-            manager itself, and -p Version selects the version of the running
-            manager - the same one that --version reports """
+            manager itself, and -p Version selects its version - the systemd
+            compatibility level that --version reports as well """
         tmp = self.testdir()
         systemctl = app.Systemctl(tmp)
         systemctl._only_property = ["Version"] # pylint: disable=protected-access
