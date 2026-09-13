@@ -16512,7 +16512,7 @@ class SystemctlBaseTest(unittest.TestCase):
         cmd = "{systemctl} stop zzz.service -vv"
         out, end = output2(cmd.format(**locals()))
         logg.info(" %s =>%s\n%s", cmd, end, out)
-        self.assertNotEqual(end, 0) # no PID known so 'kill $MAINPID' fails
+        self.assertEqual(end, 0) # inactive after a clean kill already, a stop of it is redundant
         cmd = "{systemctl} is-active zzz.service -vv"
         out, end = output2(cmd.format(**locals()))
         logg.info(" %s =>%s \n%s", cmd, end, out)
@@ -16839,7 +16839,7 @@ class SystemctlBaseTest(unittest.TestCase):
         out, end = output2(cmd.format(**locals()))
         logg.info(" %s =>%s \n%s", cmd, end, out)
         self.assertEqual(end, 3)
-        self.assertEqual(out.strip(), "failed")
+        self.assertEqual(out.strip(), "inactive") # SIGTERM is a clean exit, systemd.service(5) SuccessExitStatus=
         #
         logg.info("== 'stop' will turn 'failed' to 'inactive' (when the PID is known)")
         cmd = "{systemctl} stop zzz.service -vv"
@@ -20664,7 +20664,7 @@ class SystemctlBaseTest(unittest.TestCase):
         log = lines(reads(logfile))
         logg.info("LOG %s\n| %s", logfile, "\n| ".join(log))
         self.assertTrue(greps(log, "ignored"))
-        self.assertTrue(greps(log, "sighup"))
+        self.assertFalse(greps(log, "sighup")) # SendSIGHUP= is for stop, kill sends its own signal only
         #
         time.sleep(1) # kill is asynchronous
         top = _recent(output(_top_list))
@@ -20779,7 +20779,7 @@ class SystemctlBaseTest(unittest.TestCase):
         top = _recent(output(_top_list))
         logg.info("\n>>>\n%s", top)
         self.assertFalse(greps(top, testscriptB))
-        self.assertTrue(greps(top, testsleepB))
+        self.assertFalse(greps(top, testsleepB)) # KillMode= is for stop, kill takes all processes
         #
         log = lines(reads(logfile))
         logg.info("LOG %s\n| %s", logfile, "\n| ".join(log))
@@ -20792,7 +20792,7 @@ class SystemctlBaseTest(unittest.TestCase):
         cmd = "{systemctl} __killall {testsleepB}"
         sx____(cmd.format(**locals())) # cleanup before check
         self.assertFalse(greps(top, testscriptB))
-        self.assertTrue(greps(top, testsleepB))  # TODO?##
+        self.assertFalse(greps(top, testsleepB))
         #
         self.rm_testdir()
         self.coverage()
@@ -21061,6 +21061,118 @@ class SystemctlBaseTest(unittest.TestCase):
         #
         sx____("{systemctl} __killall {testsleepB}".format(**locals()))
         sx____("{systemctl} __killall {testsleepC}".format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_4181_systemctl_kill_without_options_is_a_sigterm(self) -> None:
+        """ systemctl kill without options sends SIGTERM to all processes of
+            the unit once (systemctl(1)). KillSignal= is for stop: a unit with
+            KillSignal=SIGQUIT still gets SIGTERM from kill, and one that ignores
+            it keeps running - kill does not wait for it or send SIGKILL."""
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        user = self.user()
+        root = self.root(testdir)
+        quick = QUICK
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("testsleep")
+        testsleepB = testsleep+"B"
+        testsleepC = testsleep+"C"
+        testscriptB = self.testname("testscriptB.sh")
+        logfile = os_path(root, "/var/log/test.log")
+        bindir = os_path(root, "/usr/bin")
+        begin = "{"
+        ends = "}"
+        text_file(logfile, "")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testscriptB}
+            KillSignal=SIGQUIT
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        shell_file(os_path(bindir, testscriptB), """
+            #! /bin/sh
+            date +%T,enter > {logfile}
+            ignored () {begin}
+              date +%T,ignored >> {logfile}
+            {ends}
+            stops () {begin}
+              date +%T,sigquit >> {logfile}
+              exit 0
+            {ends}
+            trap "ignored" 15   # SIGTERM
+            trap "stops" 3      # SIGQUIT
+            {bindir}/{testsleepC} 999 >> {logfile} 2>&1 &
+            while true; do
+               {bindir}/{testsleepB} 1 >> {logfile} 2>&1 &
+               wait $!
+            done
+        """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleepB))
+        copy_tool(_bin_sleep, os_path(bindir, testsleepC))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testscriptB))
+        self.assertTrue(greps(top, testsleepC))
+        mainpid = output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip()
+        self.assertTrue(greps(mainpid, "^MainPID=[1-9]"))
+        #
+        cmd = "{systemctl} kill zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(2) # longer than a kill would wait before a SIGKILL
+        log = lines(reads(logfile))
+        logg.info("LOG %s\n| %s", logfile, "\n| ".join(log))
+        self.assertEqual(len(greps(log, "ignored")), 1)
+        self.assertFalse(greps(log, "sigquit")) # KillSignal= is for stop
+        top = _recent(output(_top_list))
+        logg.info("\n>>>\n%s", top)
+        self.assertTrue(greps(top, testscriptB)) # ignored, and no SIGKILL
+        self.assertFalse(greps(top, testsleepC)) # all processes get it
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        self.assertEqual(out.strip(), "active")
+        self.assertEqual(output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip(), mainpid)
+        #
+        cmd = "{systemctl} stop zzb.service -vv {quick}"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        log = lines(reads(logfile))
+        self.assertTrue(greps(log, "sigquit")) # stop does use KillSignal=
+        #
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        cmd = "{systemctl} kill -s KILL --kill-whom=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(out.strip(), "failed") # SIGKILL is no clean exit, SIGTERM would be
+        #
+        sx____("{systemctl} __killall {testsleepB}".format(**locals()))
+        sx____("{systemctl} __killall {testsleepC}".format(**locals()))
+        sx____("{systemctl} __killall {testscriptB}".format(**locals()))
         self.rm_testdir()
         self.coverage()
         self.end()

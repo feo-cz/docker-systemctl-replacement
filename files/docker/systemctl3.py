@@ -722,6 +722,10 @@ def kill_whom_pidlist(whom: str, mainpid: Optional[int], pidlist: List[int]) -> 
     if whom in ["all"]:
         return list(pidlist)
     return None
+# systemd.service(5) on SuccessExitStatus=: besides exit status 0, "except for Type=oneshot,
+# the signals SIGHUP, SIGINT, SIGTERM, and SIGPIPE" are a successful termination of the main
+# process - so a unit whose main process dies of them after a kill is inactive, not failed.
+CleanExitSignals: List[int] = [signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGPIPE]
 
 def get_unit_type(module: str) -> Optional[str]:
     name, ext = os.path.splitext(module)
@@ -4655,6 +4659,16 @@ class Systemctl:
         env.update(service_directories)
         returncode = 0
         service_result = "success"
+        mainpid = self.read_mainpid_from(conf)
+        if mainpid and self.get_status_from(conf, "CleanKillPID", "") == str(mainpid):
+            if not pid_exists(mainpid) or pid_zombie(mainpid):
+                # a kill with a clean signal ended it (see signal_unit_from): the unit is
+                # inactive already, and systemd treats a stop of it as redundant (job.c,
+                # job_type_is_redundant) - there is no ExecStop left to run
+                logg.info("%s ended by a clean kill signal, nothing to stop", conf.name())
+                self.clean_pid_file_from(conf)
+                self.clean_status_from(conf)
+                return True
         if runs in ["oneshot"]:
             status_file = self.get_status_file_from(conf)
             if self.get_status_from(conf, "ActiveState", "unknown") == "inactive":
@@ -5147,21 +5161,14 @@ class Systemctl:
         if self.unitfiles.not_user_conf(conf):
             logg.error("Unit %s not for --user mode", unit)
             return False
-        if self._kill_signal or self._kill_whom:
-            return self.signal_unit_from(conf)
-        return self.kill_unit_from(conf)
-    def kill_unit_from(self, conf: SystemctlConf) -> bool:
-        if not conf:
-            return False
-        with waitlock(conf):
-            logg.info(" kill unit %s => %s", conf.name(), strQ(conf.filename()))
-            return self.do_kill_unit_from(conf)
+        return self.signal_unit_from(conf)
     def signal_unit_from(self, conf: SystemctlConf) -> bool:
         """ kill -s SIG --kill-whom=WHOM -- systemctl(1) sends the signal to the chosen
             processes once and that is all: no waiting for them, no SIGKILL after it, no
-            change to the state of the unit. Without either option kill still goes on to
-            do_kill_unit_from as it always did. No waitlock either - a unit may well be
-            told to reopen its logs while a start or a reload of it holds the lock. """
+            change to the state of the unit. Without options that is SIGTERM to all of
+            them - not KillSignal=, which like KillMode= and SendSIGKILL= belongs to stop,
+            see do_kill_unit_from. No waitlock either - a unit may well be told to reopen
+            its logs while a start or a reload of it holds the lock. """
         unit = conf.name()
         whom = self._kill_whom or "all"
         signo = signal_of(self._kill_signal or "TERM") or signal.SIGTERM
@@ -5181,6 +5188,11 @@ class Systemctl:
         for pid in pidlist:
             logg.info("kill signal %s to PID %s of %s", signo, pid, unit)
             self._kill_pid(pid, signo)
+        if mainpid and mainpid in pidlist and signo in CleanExitSignals:
+            if conf.get(Service, "Type", "simple") not in ["oneshot"]:
+                # no manager here sees the process die, so remember what it was sent: if
+                # this very PID is gone later then it ended cleanly, see get_active_service_from
+                self.write_status_from(conf, CleanKillPID=mainpid)
         return True
     def do_kill_unit_from(self, conf: SystemctlConf) -> bool:
         started = time.monotonic()
@@ -5359,6 +5371,8 @@ class Systemctl:
         logg.log(DEBUG_STATUS, "pid_file '%s' => PID %s", pid_file or status_file, strE(pid))
         if pid:
             if not pid_exists(pid) or pid_zombie(pid):
+                if self.get_status_from(conf, "CleanKillPID", "") == str(pid):
+                    return "inactive"
                 return "failed"
             return "active"
         else:
@@ -5411,6 +5425,8 @@ class Systemctl:
         logg.log(DEBUG_STATUS, "pid_file '%s' => PID %s", pid_file or status_file, strE(pid))
         if pid:
             if not pid_exists(pid) or pid_zombie(pid):
+                if self.get_status_from(conf, "CleanKillPID", "") == str(pid):
+                    return "dead"
                 return "failed"
             return "running"
         else:
