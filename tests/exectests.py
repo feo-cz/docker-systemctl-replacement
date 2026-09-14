@@ -21430,6 +21430,223 @@ class SystemctlBaseTest(unittest.TestCase):
         self.rm_testdir()
         self.coverage()
         self.end()
+    def test_4182_systemctl_kill_hup_leaves_a_later_crash_failed(self) -> None:
+        """ a daemon that handles SIGHUP survives 'kill -s HUP' - logrotate sends
+            that every week. When it crashes later it is failed, not inactive, so
+            that Restart=on-failure brings it back (restart_failed_units)."""
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        user = self.user()
+        root = self.root(testdir)
+        quick = QUICK
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("testsleep")
+        testscriptB = self.testname("testscriptB.sh")
+        logfile = os_path(root, "/var/log/test.log")
+        bindir = os_path(root, "/usr/bin")
+        begin = "{"
+        ends = "}"
+        text_file(logfile, "")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testscriptB}
+            Restart=on-failure
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        shell_file(os_path(bindir, testscriptB), """
+            #! /bin/sh
+            date +%T,enter > {logfile}
+            sighup () {begin}
+              date +%T,sighup >> {logfile}
+            {ends}
+            trap "sighup" 1     # SIGHUP
+            while true; do
+               {bindir}/{testsleep} 1 >> {logfile} 2>&1 &
+               wait $!
+            done
+        """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        mainpid = output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip()
+        self.assertTrue(greps(mainpid, "^MainPID=[1-9]"))
+        #
+        cmd = "{systemctl} kill -s HUP --kill-whom=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        log = lines(reads(logfile))
+        self.assertTrue(greps(log, "sighup"))
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        self.assertEqual(out.strip(), "active")
+        #
+        pid = int(mainpid.split("=", 1)[1])
+        os.kill(pid, signal.SIGKILL) # a real crash, not sent by systemctl
+        time.sleep(1)
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(out.strip(), "failed") # the HUP it survived says nothing about this
+        #
+        sx____("{systemctl} __killall {testsleep}".format(**locals()))
+        sx____("{systemctl} __killall {testscriptB}".format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_4183_systemctl_kill_term_to_a_tidy_daemon_is_inactive(self) -> None:
+        """ a daemon that handles SIGTERM to finish tidily and exit 0 is inactive
+            after 'systemctl kill', not failed (systemd.service(5) SuccessExitStatus=)
+            - and Restart=on-failure does not bring it back."""
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        user = self.user()
+        root = self.root(testdir)
+        quick = QUICK
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("testsleep")
+        testscriptB = self.testname("testscriptB.sh")
+        logfile = os_path(root, "/var/log/test.log")
+        bindir = os_path(root, "/usr/bin")
+        begin = "{"
+        ends = "}"
+        text_file(logfile, "")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testscriptB}
+            Restart=on-failure
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        shell_file(os_path(bindir, testscriptB), """
+            #! /bin/sh
+            date +%T,enter > {logfile}
+            tidy () {begin}
+              date +%T,tidy >> {logfile}
+              exit 0
+            {ends}
+            trap "tidy" 15      # SIGTERM
+            while true; do
+               {bindir}/{testsleep} 1 >> {logfile} 2>&1 &
+               wait $!
+            done
+        """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        cmd = "{systemctl} kill --kill-whom=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(2)
+        log = lines(reads(logfile))
+        logg.info("LOG %s\n| %s", logfile, "\n| ".join(log))
+        self.assertTrue(greps(log, "tidy"))
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(out.strip(), "inactive") # caught SIGTERM, finished tidily
+        #
+        sx____("{systemctl} __killall {testsleep}".format(**locals()))
+        sx____("{systemctl} __killall {testscriptB}".format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
+    def test_4184_systemctl_kill_term_outlived_leaves_a_later_crash_failed(self) -> None:
+        """ a process that is still there TimeoutStopSec after the SIGTERM of 'kill'
+            did not end by it: when it crashes later it is failed, and Restart=on-failure
+            applies. Before that time is up a crash still reads as the end of it."""
+        self.begin()
+        testname = self.testname()
+        testdir = self.testdir()
+        user = self.user()
+        root = self.root(testdir)
+        quick = QUICK
+        systemctl = cover() + _systemctl_py + " --root=" + root
+        testsleep = self.testname("testsleep")
+        testscriptB = self.testname("testscriptB.sh")
+        logfile = os_path(root, "/var/log/test.log")
+        bindir = os_path(root, "/usr/bin")
+        begin = "{"
+        ends = "}"
+        text_file(logfile, "")
+        text_file(os_path(testdir, "zzb.service"), """
+            [Unit]
+            Description=Testing B
+            [Service]
+            Type=simple
+            ExecStart={bindir}/{testscriptB}
+            Restart=on-failure
+            TimeoutStopSec=2
+            [Install]
+            WantedBy=multi-user.target
+            """.format(**locals()))
+        shell_file(os_path(bindir, testscriptB), """
+            #! /bin/sh
+            date +%T,enter > {logfile}
+            ignored () {begin}
+              date +%T,ignored >> {logfile}
+            {ends}
+            trap "ignored" 15   # SIGTERM
+            while true; do
+               {bindir}/{testsleep} 1 >> {logfile} 2>&1 &
+               wait $!
+            done
+        """.format(**locals()))
+        copy_tool(_bin_sleep, os_path(bindir, testsleep))
+        copy_file(os_path(testdir, "zzb.service"), os_path(root, "/etc/systemd/system/zzb.service"))
+        #
+        cmd = "{systemctl} start zzb.service -vv"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(end, 0)
+        time.sleep(1)
+        mainpid = output("{systemctl} show -p MainPID zzb.service".format(**locals())).strip()
+        self.assertTrue(greps(mainpid, "^MainPID=[1-9]"))
+        cmd = "{systemctl} kill --kill-whom=main zzb.service -vv"
+        out, err, end = output3(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s\n%s", cmd, end, err, out)
+        self.assertEqual(end, 0)
+        time.sleep(4) # longer than TimeoutStopSec=2
+        log = lines(reads(logfile))
+        self.assertTrue(greps(log, "ignored"))
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        self.assertEqual(out.strip(), "active") # outlived it - and this look notices
+        #
+        pid = int(mainpid.split("=", 1)[1])
+        os.kill(pid, signal.SIGKILL) # a real crash
+        time.sleep(1)
+        cmd = "{systemctl} is-active zzb.service"
+        out, end = output2(cmd.format(**locals()))
+        logg.info(" %s =>%s\n%s", cmd, end, out)
+        self.assertEqual(out.strip(), "failed")
+        #
+        sx____("{systemctl} __killall {testsleep}".format(**locals()))
+        sx____("{systemctl} __killall {testscriptB}".format(**locals()))
+        self.rm_testdir()
+        self.coverage()
+        self.end()
     def test_4201_systemctl_py_dependencies_plain_start_order(self) -> None:
         """ check list-dependencies - standard order of starting
             units is simply the command line order"""
