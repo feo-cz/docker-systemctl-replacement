@@ -2292,10 +2292,11 @@ class SystemctlUnitFiles:
                     continue
                 filepath = os_path(NIX if filename.startswith("//") else self._root, filename)
                 if not os.path.exists(filepath):
-                    logg.error("not found %s", filepath)
                     if "!" not in mode:
                         logg.log(warn, "%s: %s - path not found: %s", unit, spec, filename)
                         problems += [spec+"="+checkfile]
+                    else:
+                        logg.debug("%s: %s....notfound [%s]", unit, spec, filepath)
                 else:
                     if "PathExists" in spec:
                         if "!" in mode:
