@@ -2456,6 +2456,37 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(status.get("CleanKillPID"), None) # 60s > 5s, it outlived the signal
         self.assertEq(status.get("MainPID"), str(alive))
         self.rm_testdir()
+    def test_0560(self) -> None:
+        """ systemd.unit(5): ConditionPathExists=!PATH is met when PATH is absent -
+            Debian's ssh.service has ConditionPathExists=!/etc/ssh/sshd_not_to_be_run.
+            A met condition is no error, systemd logs condition results at debug. An
+            unmet one is still reported, with the unit and the setting it came from. """
+        tmp = os.path.abspath(self.testdir())
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", F"""
+        [Unit]
+        ConditionPathExists=!{tmp}/not_to_be_run
+        [Service]
+        ExecStart=/bin/sleep 9""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        with self.assertNoLogs(app.logg, level="ERROR"):
+            problems = unit.check_file_conditions(conf)
+        self.assertEq(problems, [])
+        text_file(F"{tmp}/{svc1}", F"""
+        [Unit]
+        ConditionPathExists={tmp}/not_to_be_run
+        [Service]
+        ExecStart=/bin/sleep 9""")
+        unit = app.SystemctlUnitFiles()
+        unit.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = unit.get_conf(svc1)
+        with self.assertLogs(app.logg, level="WARNING") as logs:
+            problems = unit.check_file_conditions(conf)
+        self.assertEq(len(problems), 1)
+        self.assertTrue([line for line in logs.output if "test1.service: ConditionPathExists - path not found" in line], logs.output)
+        self.rm_testdir()
 
 if __name__ == "__main__":
     # unittest.main()
