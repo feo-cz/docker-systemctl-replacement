@@ -726,6 +726,41 @@ def kill_whom_pidlist(whom: str, mainpid: Optional[int], pidlist: List[int]) -> 
 # the signals SIGHUP, SIGINT, SIGTERM, and SIGPIPE" are a successful termination of the main
 # process - so a unit whose main process dies of them after a kill is inactive, not failed.
 CleanExitSignals: List[int] = [signal.SIGHUP, signal.SIGINT, signal.SIGTERM, signal.SIGPIPE]
+def signal_disposition(pid: int, signo: int) -> Optional[str]:
+    """ how that process takes the signal - signal(7): "caught" by a handler of its
+        own, "ignored", or "default" when neither, from the SigCgt and SigIgn masks of
+        /proc/PID/status. None when they cannot be read. """
+    masks: Dict[str, int] = {}
+    try:
+        with open(_proc_pid_status.format(pid=pid)) as f:
+            for line in f:
+                if line.startswith(("SigCgt:", "SigIgn:")):
+                    name, value = line.split(":", 1)
+                    masks[name] = int(value.strip(), 16)
+    except (OSError, ValueError) as e:
+        logg.debug("can not read signal masks of PID %s >> %s", pid, e)
+        return None
+    if len(masks) != 2:
+        return None
+    bit = 1 << (signo - 1)
+    if masks["SigIgn"] & bit:
+        return "ignored"
+    if masks["SigCgt"] & bit:
+        return "caught"
+    return "default"
+def kill_ends_cleanly(signo: int, disposition: Optional[str]) -> bool:
+    """ whether a main process that dies after this signal ended by it, and cleanly
+        (systemd.service(5) SuccessExitStatus=). A signal it ignores ends nothing.
+        SIGHUP is what a daemon is sent to reopen its logs: a handler for it means the
+        process lives on, so only the default action ends it. SIGINT, SIGTERM and SIGPIPE
+        ask a process to finish, and a handler for them is how it finishes tidily. """
+    if signo not in CleanExitSignals:
+        return False
+    if disposition in ["ignored"]:
+        return False
+    if signo == signal.SIGHUP:
+        return disposition in ["default"]
+    return True
 
 def get_unit_type(module: str) -> Optional[str]:
     name, ext = os.path.splitext(module)
@@ -3236,6 +3271,10 @@ class Systemctl:
                     except KeyError: pass
                 else:
                     conf.status[key] = strE(value)
+            if "MainPID" in status and conf.status.get("CleanKillPID", "") != conf.status.get("MainPID", ""):
+                # the note of signal_unit_from is about one process; another MainPID ends it
+                conf.status.pop("CleanKillPID", None)
+                conf.status.pop("CleanKillSince", None)
         try:
             with open(status_file, "w") as f:
                 for key in sorted(conf.status):
@@ -5175,6 +5214,8 @@ class Systemctl:
         mainpid = self.read_mainpid_from(conf)
         if mainpid and (not pid_exists(mainpid) or pid_zombie(mainpid)):
             mainpid = None
+        # asked before the signal goes out - afterwards the process may be gone
+        ends_main = bool(mainpid) and kill_ends_cleanly(signo, signal_disposition(mainpid or 0, signo))
         pidlist = kill_whom_pidlist(whom, mainpid, self.pidlist_of(mainpid))
         if pidlist is None:
             logg.error("Failed to kill unit %s: Invalid whom argument: %s", unit, whom)
@@ -5188,11 +5229,12 @@ class Systemctl:
         for pid in pidlist:
             logg.info("kill signal %s to PID %s of %s", signo, pid, unit)
             self._kill_pid(pid, signo)
-        if mainpid and mainpid in pidlist and signo in CleanExitSignals:
+        if ends_main and mainpid in pidlist:
             if conf.get(Service, "Type", "simple") not in ["oneshot"]:
-                # no manager here sees the process die, so remember what it was sent: if
-                # this very PID is gone later then it ended cleanly, see get_active_service_from
-                self.write_status_from(conf, CleanKillPID=mainpid)
+                # no manager here sees the process die, so remember what ends it: if this
+                # very PID is gone later then it ended cleanly, see get_active_service_from.
+                # Not for a SIGHUP it handles - it lives on, and a later crash is a crash.
+                self.write_status_from(conf, CleanKillPID=mainpid, CleanKillSince=int(time.time()))
         return True
     def do_kill_unit_from(self, conf: SystemctlConf) -> bool:
         started = time.monotonic()
@@ -5374,9 +5416,22 @@ class Systemctl:
                 if self.get_status_from(conf, "CleanKillPID", "") == str(pid):
                     return "inactive"
                 return "failed"
+            if self.get_status_from(conf, "CleanKillPID", "") == str(pid):
+                self.expire_clean_kill_from(conf)
             return "active"
         else:
             return "inactive"
+    def expire_clean_kill_from(self, conf: SystemctlConf) -> None:
+        """ the main process was sent a signal that ends it cleanly, and it is still there
+            after TimeoutStopSec - so it did not end by it, and a later death of it is not
+            that clean end. Only where the status is ours to write, a look is no write. """
+        since = to_intN(self.get_status_from(conf, "CleanKillSince", ""), 0) or 0
+        if time.time() - since <= self.unitfiles.get_TimeoutStopSec(conf):
+            return
+        if not os.access(self.get_status_file_from(conf), os.W_OK):
+            return
+        logg.debug("%s outlived its clean kill signal, a later end is no clean end", conf.name())
+        self.write_status_from(conf, CleanKillPID=None, CleanKillSince=None)
     def get_active_target_from(self, conf: SystemctlConf) -> str:
         """ returns 'active' 'inactive' 'failed' 'unknown' """
         return self.get_active_target(conf.name())

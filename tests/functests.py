@@ -1150,6 +1150,82 @@ class AppUnitTest(unittest.TestCase):
         self.assertEq(app.kill_whom_pidlist("bogus", 100, pidlist), None)
         self.assertEq(app.kill_whom_pidlist("Main", 100, pidlist), None)
 
+    def test_0532(self) -> None:
+        """ how a process takes a signal is a fact of the process (signal(7),
+            /proc/PID/status): a daemon that handles SIGHUP to reopen its logs catches
+            it, one may ignore SIGUSR1, and what it neither catches nor ignores takes
+            the default action. Whether kill ends it cleanly follows from that: never by
+            a signal it ignores, by SIGHUP only without a handler, and by SIGTERM, SIGINT
+            and SIGPIPE also with one, since that handler is how a daemon finishes """
+        import subprocess # pylint: disable=import-outside-toplevel
+        proc = subprocess.Popen(["/bin/bash", "-c", "trap 'true' HUP; trap '' USR1; while true; do sleep 1; done"])
+        try:
+            for _ in range(50):
+                with open(F"/proc/{proc.pid}/status") as f:
+                    if [line for line in f if line.startswith("SigCgt:") and line.split()[1].strip("0")]:
+                        break
+                app.time.sleep(0.1)
+            self.assertEq(app.signal_disposition(proc.pid, signal.SIGHUP), "caught")
+            self.assertEq(app.signal_disposition(proc.pid, signal.SIGUSR1), "ignored")
+            self.assertEq(app.signal_disposition(proc.pid, signal.SIGTERM), "default")
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEq(app.signal_disposition(proc.pid, signal.SIGTERM), None) # gone
+        self.assertFalse(app.kill_ends_cleanly(signal.SIGHUP, "caught"))    # rsyslog after logrotate
+        self.assertTrue(app.kill_ends_cleanly(signal.SIGHUP, "default"))
+        self.assertFalse(app.kill_ends_cleanly(signal.SIGHUP, None))
+        self.assertTrue(app.kill_ends_cleanly(signal.SIGTERM, "caught"))    # a tidy shutdown
+        self.assertTrue(app.kill_ends_cleanly(signal.SIGTERM, "default"))
+        self.assertTrue(app.kill_ends_cleanly(signal.SIGTERM, None))
+        self.assertFalse(app.kill_ends_cleanly(signal.SIGPIPE, "ignored"))
+        self.assertFalse(app.kill_ends_cleanly(signal.SIGKILL, "default"))  # no clean exit
+        self.assertFalse(app.kill_ends_cleanly(signal.SIGUSR1, "default"))
+    def test_0533(self) -> None:
+        """ the note that a main process was sent a clean exit signal belongs to that
+            process only: once a start writes another MainPID it must be gone, or a later
+            crash of the new process would be read as a clean end and never restarted """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9""")
+        systemctl = app.Systemctl(tmp)
+        systemctl.unitfiles.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = systemctl.unitfiles.get_conf(svc1)
+        systemctl.write_status_from(conf, MainPID=1111, CleanKillPID=1111, CleanKillSince=12345)
+        self.assertEq(systemctl.read_status_from(conf).get("CleanKillPID"), "1111")
+        systemctl.write_status_from(conf, MainPID=2222)
+        status = systemctl.read_status_from(conf)
+        self.assertEq(status.get("MainPID"), "2222")
+        self.assertEq(status.get("CleanKillPID"), None)
+        self.assertEq(status.get("CleanKillSince"), None)
+        self.rm_testdir()
+    def test_0534(self) -> None:
+        """ a main process that is still there TimeoutStopSec after a clean kill signal
+            did not end by it: the note goes, so that its later death reads as failed
+            and Restart=on-failure applies. Within that time the note stays. """
+        tmp = self.testdir()
+        svc1 = "test1.service"
+        text_file(F"{tmp}/{svc1}", """
+        [Service]
+        ExecStart=/bin/sleep 9
+        TimeoutStopSec=5""")
+        systemctl = app.Systemctl(tmp)
+        systemctl.unitfiles.add_unit_file(svc1, F"{tmp}/{svc1}")
+        conf = systemctl.unitfiles.get_conf(svc1)
+        alive = os.getpid()
+        now = int(app.time.time())
+        systemctl.write_status_from(conf, MainPID=alive, CleanKillPID=alive, CleanKillSince=now - 1)
+        self.assertEq(systemctl.get_active_service_from(conf), "active")
+        self.assertEq(systemctl.read_status_from(conf).get("CleanKillPID"), str(alive)) # 1s < 5s
+        systemctl.write_status_from(conf, CleanKillSince=now - 60)
+        self.assertEq(systemctl.get_active_service_from(conf), "active")
+        status = systemctl.read_status_from(conf)
+        self.assertEq(status.get("CleanKillPID"), None) # 60s > 5s, it outlived the signal
+        self.assertEq(status.get("MainPID"), str(alive))
+        self.rm_testdir()
+
 if __name__ == "__main__":
     # unittest.main()
     suite = unittest.TestSuite()
